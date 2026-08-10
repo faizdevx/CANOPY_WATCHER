@@ -1,0 +1,146 @@
+# =========================
+
+# Python
+
+# =========================
+
+**pycache**/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# =========================
+
+# Virtual environments
+
+# =========================
+
+.venv/
+venv/
+env/
+ENV/
+
+# =========================
+
+# Environment / secrets
+
+# =========================
+
+.env
+.env.*
+!.env.example
+
+# Certificates / keys / tokens
+
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# =========================
+
+# Canopy Watch generated data
+
+# =========================
+
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Generated hardware configuration
+
+config/hardware.generated.yaml
+
+# Local overrides
+
+config/local.yaml
+config/*.local.yaml
+
+# =========================
+
+# Logs
+
+# =========================
+
+*.log
+logs/
+
+# =========================
+
+# Models / large local files
+
+# =========================
+
+# Uncomment if models are not stored in Git:
+
+# models/*.onnx
+
+# models/*.tflite
+
+# models/*.pt
+
+# models/*.pth
+
+# =========================
+
+# Test / simulation output
+
+# =========================
+
+tests/output/
+tests/tmp/
+*.png
+*.jpg
+*.jpeg
+
+# =========================
+
+# IDE / editors
+
+# =========================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# =========================
+
+# OS files
+
+# =========================
+
+Thumbs.db
+Desktop.ini
+
+# =========================
+
+# Build / packaging
+
+# =========================
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# =========================
+
+# Temporary files
+
+# =========================
+
+*.tmp
+*.temp
+*.bak
+*~

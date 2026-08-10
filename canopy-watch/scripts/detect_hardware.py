@@ -123,11 +123,9 @@ def detect_ram_mb():
 
 
 def detect_cameras():
-    """Returns list of detected Linux video device paths. Empty elsewhere —
-    macOS/Windows enumeration needs extra deps, left as a manual override."""
-    if platform.system() == "Linux":
-        return sorted(str(p) for p in Path("/dev").glob("video*"))
-    return []
+    """Detect cameras using the shared webcam discovery logic."""
+    from edge.drivers.webcam import list_devices
+    return list_devices()
 
 
 def detect_libcamera():
@@ -198,10 +196,30 @@ def classify(gpu_accelerator, ram_mb, jetson_model, pi_model, cameras, has_libca
         }
     else:
         # laptop / generic workstation
-        hardware_tier = "accelerated" if gpu_accelerator == "cuda" and ram_mb and ram_mb >= 8192 else "constrained"
+        hardware_tier = (
+            "accelerated"
+            if gpu_accelerator == "cuda"
+            and ram_mb
+            and ram_mb >= 8192
+            else "constrained"
+        )
+
+    if cameras:
+        first_camera = cameras[0]
+
         driver = {
-            "camera": "webcam" if cameras else "mock",
-            "camera_params": {"device_path": cameras[0]} if cameras else {},
+            "camera": "webcam",
+            "camera_params": {
+                "device_index": first_camera["index"],
+                "device_name": first_camera.get("name"),
+            },
+            "gpio": "mock",
+            "power": "mock",
+        }
+    else:
+        driver = {
+            "camera": "mock",
+            "camera_params": {},
             "gpio": "mock",
             "power": "mock",
         }
