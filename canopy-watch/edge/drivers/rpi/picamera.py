@@ -44,7 +44,12 @@ class PiCameraDriver(CameraDriver):
         self.hflip: bool = bool(self.params.get("hflip", False))
         self.vflip: bool = bool(self.params.get("vflip", False))
         self.controls: Dict[str, Any] = dict(self.params.get("controls", {}))
+        # SensorTimestamp is a real hardware capture time — one of only two
+        # places in this project where a media timestamp genuinely exists.
+        self.report_sensor_timestamp: bool = bool(
+            self.params.get("report_sensor_timestamp", True))
 
+        self._last_sensor_ts: Optional[float] = None
         self._picam2 = None
         self._sensor_info: Dict[str, Any] = {}
 
@@ -110,12 +115,29 @@ class PiCameraDriver(CameraDriver):
     def _read(self) -> np.ndarray:
         if self._picam2 is None:
             raise CameraReadError("picamera: camera handle is gone")
-        try:
-            arr = self._picam2.capture_array("main")
-        except Exception as exc:
-            raise CameraReadError(f"picamera: capture_array failed: {exc}") from exc
+        self._last_sensor_ts = None
+        if self.report_sensor_timestamp:
+            # capture_request() gets pixels and metadata from the SAME request,
+            # so the timestamp provably belongs to this frame. Two separate
+            # calls could straddle a frame boundary.
+            try:
+                request = self._picam2.capture_request()
+            except Exception as exc:
+                raise CameraReadError(f"picamera: capture_request failed: {exc}") from exc
+            try:
+                arr = request.make_array("main")
+                sensor_ns = (request.get_metadata() or {}).get("SensorTimestamp")
+                if sensor_ns:
+                    self._last_sensor_ts = float(sensor_ns) / 1e9   # ns -> s
+            finally:
+                request.release()
+        else:
+            try:
+                arr = self._picam2.capture_array("main")
+            except Exception as exc:
+                raise CameraReadError(f"picamera: capture_array failed: {exc}") from exc
         if arr is None:
-            raise CameraReadError("picamera: capture_array returned None")
+            raise CameraReadError("picamera: capture returned None")
 
         if arr.ndim == 3 and arr.shape[2] == 4:      # XBGR8888 / XRGB8888
             arr = arr[:, :, :3]
@@ -146,7 +168,13 @@ class PiCameraDriver(CameraDriver):
             "format": self.pixel_format,
             "sensor": self._sensor_info.get("Model"),
             "camera_num": self.camera_num,
+            "media_timestamp_available": self.report_sensor_timestamp,
         }
+
+    def _frame_metadata(self) -> Dict[str, Any]:
+        # None when unavailable. Capture must never backfill this from the
+        # receive time — absent is debuggable, fabricated is not.
+        return {"media_timestamp": self._last_sensor_ts}
 
 
 def _transform(hflip: bool, vflip: bool):

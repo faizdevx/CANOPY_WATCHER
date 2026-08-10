@@ -110,6 +110,10 @@ class JetsonCSIDriver(CameraDriver):
         if self._cap is None:
             raise CameraReadError("csi_gstreamer: capture handle is gone")
         ok, bgr = self._cap.read()
+        # Argus buffers carry a PTS, but OpenCV's appsink wrapper does not
+        # expose it (CAP_PROP_POS_MSEC is meaningless for live capture).
+        # Reporting None is correct; a raw appsink consumer could surface the
+        # real PTS later without changing this interface.
         if not ok or bgr is None:
             raise CameraReadError("csi_gstreamer: appsink produced no frame")
         return np.ascontiguousarray(bgr[:, :, ::-1])  # BGR -> RGB
@@ -134,8 +138,12 @@ class JetsonCSIDriver(CameraDriver):
             "sensor_id": self.sensor_id,
             "sensor_mode": self.sensor_mode,
             "zero_copy": False,  # deliberate: NVMM -> CPU numpy for portability
+            "media_timestamp_available": False,
             "pipeline": self._pipeline or None,
         }
+
+    def _frame_metadata(self) -> Dict[str, Any]:
+        return {"media_timestamp": None}
 
 
 def _has_gstreamer(cv2) -> bool:

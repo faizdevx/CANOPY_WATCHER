@@ -1,0 +1,90 @@
+# =============================================================================
+# capture — merge these blocks into your existing config layers
+#
+# Every key here is POLICY, so it belongs in base.yaml + <profile>.yaml only.
+# Nothing in this section is ever written by scripts/detect_hardware.py — the
+# machine cannot know how many seconds of history your project wants.
+#
+# The one runtime input that is NOT yaml: bytes-per-frame, which comes from the
+# driver's negotiated resolution via get_capabilities(). That is the honest
+# source — the config's requested width/height is only a request.
+# =============================================================================
+
+
+# ------------------------------- base.yaml -----------------------------------
+capture:
+  # What you want.
+  buffer_seconds: 30
+
+  # What you actually get. THIS WINS.
+  #   1920x1080x3 = 6.2 MB/frame; 30 fps x 60 s = 11.2 GB.
+  #   Jetson Nano has 4 GB shared CPU/GPU. Pi has 2-8 GB.
+  # The service derives the real depth from live frame size at startup and logs
+  # it in actual numbers, so the limit is discovered in a log line rather than
+  # by an OOM kill on a node in a forest at 3am.
+  buffer_max_memory_mb: 512
+
+  # Time-based, not "every Nth frame" — a modulo counter silently changes rate
+  # when the camera negotiates a different fps than requested.
+  tier1_sample_interval_ms: 200
+
+  # Drop-oldest. Depth 1 = latest-frame-wins, correct for real-time detection.
+  # Raise only if Tier1 batches. Dropped frames stay retrievable from the buffer.
+  tier1_queue_depth: 1
+
+  # Camera dropout recovery. Last value repeats forever.
+  reopen_backoff_s: [1, 2, 5, 10, 30]
+  max_reopen_attempts: 0        # 0 = never give up (correct for field devices)
+
+
+# ------------------------------ laptop.yaml ----------------------------------
+# Dev box: RAM is cheap, iteration speed matters, dropouts are USB replugs.
+capture:
+  buffer_seconds: 30
+  buffer_max_memory_mb: 2048
+  tier1_sample_interval_ms: 100
+  reopen_backoff_s: [1, 2]
+  max_reopen_attempts: 5        # fail visibly on a dev box instead of hanging
+
+
+# ------------------------------- rpi.yaml ------------------------------------
+# hardware_tier: constrained. Tier1-only, so the buffer exists mainly to serve
+# a deferred-to-cloud Tier2. Memory is the binding constraint, not seconds.
+capture:
+  buffer_seconds: 15
+  buffer_max_memory_mb: 128
+  tier1_sample_interval_ms: 500     # CPU-only inference; do not oversubscribe
+  tier1_queue_depth: 1
+  reopen_backoff_s: [2, 5, 15, 60]
+
+
+# ---------------------------- jetson_nano.yaml -------------------------------
+# 4 GB shared between CPU and GPU — the GPU needs most of it for Tier2.
+capture:
+  buffer_seconds: 20
+  buffer_max_memory_mb: 384
+  tier1_sample_interval_ms: 200
+  reopen_backoff_s: [2, 5, 15, 60]
+
+
+# ---------------------------- jetson_orin.yaml -------------------------------
+capture:
+  buffer_seconds: 30
+  buffer_max_memory_mb: 1024
+  tier1_sample_interval_ms: 100
+  reopen_backoff_s: [2, 5, 15, 60]
+
+
+# ------------------------- driver-side additions -----------------------------
+# Only the CSI paths have a real sensor timestamp. Capture reports it as null
+# everywhere else and NEVER backfills it from the receive time.
+#
+# rpi.yaml:
+#   hardware:
+#     camera_params:
+#       report_sensor_timestamp: true   # uses capture_request() so pixels and
+#                                       # metadata come from the same request
+#
+# Env overrides work as before, e.g.:
+#   CW__capture__buffer_max_memory_mb=256
+#   CW__capture__tier1_sample_interval_ms=1000
