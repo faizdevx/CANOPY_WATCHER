@@ -177,3 +177,350 @@ requirements.txt / dependency pinning for pyyaml, psutil
 macOS/Windows camera enumeration in detect_hardware.py (currently only Linux implemented; falls back to manual override elsewhere)
 Fleet-level config push (as per the original design’s note in the “Edge fleet management” scalability subsection) – not applicable to the single-node loader.
 
+# CAMERA DRIVER INTERFACE 
+
+### Camera Driver + YAML
+
+The YAML configuration chooses and configures the camera driver.
+
+```text
+base.yaml
+  ↓
+profile.yaml
+  ↓
+hardware.generated.yaml
+  ↓
+env vars
+  ↓
+Final config
+  ↓
+Camera Factory
+  ↓
+Camera Driver
+  ↓
+Standard Frame
+  ↓
+Capture Service → Tier1/Tier2
+```
+
+Example:
+
+```yaml
+camera: webcam
+
+camera_params:
+  device_name: "Logitech C920"
+  device_index: 0
+  width: 1280
+  height: 720
+  fps: 30
+```
+
+`camera` chooses the driver:
+
+* `mock` -> mock camera
+* `webcam` -> OpenCV webcam
+* `picamera` -> Raspberry Pi CSI
+* `csi_gstreamer` -> Jetson CSI
+
+The **Config Loader** loads the YAML configuration. The **Factory** converts the chosen driver name into an implementation. The **driver** takes care of hardware-specific capturing and produces a standard `Frame`.
+
+The rest of the code works with `Frame` and does not depend on which hardware we use - laptop, Raspberry Pi or Jetson.
+
+### Why YAML plus Driver Interface?
+
+because
+
+they address different issues:
+
+YAML is used to store the configuration, i.e., the camera to be used along with its parameters,
+Factory is used to select the corresponding implementation based on the name in YAML,
+the Driver Interface is used as a common contract for all drivers,
+and
+the actual Driver is used to access the camera hardware.
+Finally,
+the Frame is produced as a result which is further consumed elsewhere in a standardized form.
+
+YAML $ \rightarrow $ Factory $ \rightarrow $ Driver $ \rightarrow $ Standard Frame $ \rightarrow $ Application
+
+This way, hardware-specific code is kept away from Capture Service, Tier1, Tier2, and scoring.
+
+### How the Camera Interface was Designed
+
+Recall that the initial goal was to support both laptop, raspberry pi, and jetson platforms in cameras without scattering the platform-specific code in all parts of the application. For this reason, we did some research to find out which drivers are available for each platform:
+
+Laptop
+├── Windows → Media Foundation
+├── macOS → AVFoundation
+└── Linux → V4L2
+
+Raspberry Pi
+├── USB → V4L2
+└── CSI → libcamera / Picamera2
+
+Jetson
+├── USB → V4L2
+└── CSI → Argus / GStreamer
+
+As a result, we got that the choice of drivers depends on the camera technology, which is not surprising. Here are some examples of possible combinations:
+
+Jetson + USB → webcam
+Jetson + CSI → csi_gstreamer
+Pi + USB → webcam
+Pi + CSI → picamera
+
+### Shared and Platform-specific Drivers
+
+It turns out that for the case of USB + V4L2, this code can be shared between laptop, raspberry pi, and jetson. For the time being, we have decided to keep CSI-specific code separated for each platform:
+
+webcam.py       → OpenCV / USB
+rpi/picamera.py    → Picamera2 / Pi CSI
+jetson/csi_gstreamer.py → Argus / GStreamer / Jetson CSI
+mock/camera.py     → testing and development
+This way, we avoid code duplication for the same technology (CSI) across different platforms (rpi, jetson) which would be necessary otherwise.
+
+### Standard Frame Output
+
+After reviewing the options for camera stacks, the next question was – what format should each driver return?
+
+It is expected that different drivers return different structures:
+```
+
+OpenCV object
+Picamera2 output
+GStreamer buffer
+```
+In order not to tie downstream processing to a specific hardware stack, each driver converts its output into one standard `Frame` object:
+```
+Frame
+├── data    → RGB numpy array
+├── timestamp → capture time
+
+├── source   → driver name
+└── metadata  → additional info
+```
+The image data in the frame has the following format:
+```
+RGB
+H × W × 3
+uint8
+```
+This allows for a simple flow:
+```
+Different Camera Systems
+↓
+Different Drivers
+↓
+One Standard Frame
+↓
+Same AI Pipeline
+```
+### Failure Cases → Interface Design
+The interface was designed based on the possible failure scenarios that can occur with cameras:
+Camera opens, but does not output frames → verify real frames in `open()`
+Bad first frames → warm up and skip first frames
+Camera index changed → prefer `device_name`, fall back to `device_index`
+Temporary read failures → retry on error
+Camera dies later → `is_healthy()` checks for recent frames
+Failure cases were identified, and based on them – interface requirements were established. Thus, an interface was implemented that encapsulated the requirements as code.
+The process looked like this:
+```
+Research
+↓
+Failure cases
+↓
+Interface requirements
+↓
+Implementation
+↓
+Tests
+```
+This turned the research process into a living contract for camera drivers.
+### Laptop Webcam Example
+A developer can test a computer vision project on their own laptop:
+They use the built-in or USB webcam;
+```
+Laptop Webcam
+↓
+OpenCV
+↓
+WebcamDriver
+↓
+CameraDriver
+↓
+Standard RGB Frame
+↓
+Capture Service
+```
+A minimal config for such a setup could look like this:
+```
+hardware:
+driver:
+camera: webcam
+camera_params:
+device_name: "Integrated Camera"
+device_index: 0
+width: 1280
+height: 720
+fps: 30
+```
+
+Since each laptop has its own camera name and index, such cameras must be discovered and verified using `detect_hardware.py` and `camera_probe.py`.
+
+### Laptop Operational Note
+
+To use a real webcam:
+```
+
+pip install pyyaml psutil opencv-python
+
+python scripts/detect_hardware.py
+python scripts/camera_probe.py --list
+python scripts/camera_probe.py --driver webcam --frames 30
+```
+
+Once you successfully get 30 valid frames, the webcam driver and camera layer are working.
+
+In case of no physical webcam, you could use:
+```
+
+camera: mock
+```
+
+This allows you to develop and test Capture → Tier1 → Tier2 → Risk Scoring chains using mocked frames.
+
+### Raspberry Pi Operational Note
+
+For USB webcam:
+```
+
+camera: webcam
+```
+
+The path is as following:
+```
+
+USB Camera → V4L2 → OpenCV → WebcamDriver → CameraDriver
+```
+You could check it by:
+```
+
+python3 scripts/detect_hardware.py
+python3 scripts/camera_probe.py --list
+python3 scripts/camera_probe.py --driver webcam --frames 30
+```
+
+For CSI camera:
+
+Install Picamera2 first:
+```
+
+sudo apt install -y python3-picamera2
+```
+
+Use the config:
+```
+
+camera: picamera
+```
+
+The path is as following:
+```
+
+CSI Camera → libcamera → Picamera2 → PiCameraDriver → CameraDriver
+```
+You could check it by:
+```
+
+python3 scripts/camera_probe.py --list
+python3 scripts/camera_probe.py --driver picamera --frames 30
+```
+
+### Jetson Operational Note
+
+For USB webcam:
+```
+
+camera: webcam
+```
+
+The path is as following:
+```
+
+USB Camera → V4L2 → OpenCV → WebcamDriver → CameraDriver
+```
+
+For CSI camera:
+```
+
+camera: csi_gstreamer
+```
+
+The path is as following:
+```
+
+CSI Camera → Argus → nvarguscamerasrc → GStreamer → JetsonCSIDriver → CameraDriver
+```
+
+First verify the Jetson camera pipeline:
+```
+
+gst-launch-1.0 nvarguscamerasrc num-buffers=1 ! fakesink
+```
+
+Then run:
+```
+
+python3 scripts/camera_probe.py --list
+python3 scripts/camera_probe.py --driver csi_gstreamer --frames 30
+```
+
+### Camera Paths
+```
+
+Laptop
+Webcam → webcam
+
+Raspberry Pi
+USB → webcam
+CSI → picamera
+
+Jetson
+USB → webcam
+CSI → csi_gstreamer
+```
+
+All drivers generate the same CameraDriver output and thus the same input format for the Capture Service and AI pipeline.
+
+### architecture till camera interface 
+
+```
+
+             CONFIGURATION
+                  │
+                  ▼
+          hardware.driver.camera
+                  │
+                  ▼
+              FACTORY
+                  │
+          ┌───────┼────────┐
+          ▼       ▼        ▼
+       webcam  picamera  gstreamer
+          │       │        │
+          └───────┼────────┘
+                  ▼
+            CameraDriver
+                  │
+                  ▼
+               Frame
+                  │
+                  ▼
+           Capture Service
+                  │
+                  ▼
+             Tier1 / Tier2
+
+
+```
+
