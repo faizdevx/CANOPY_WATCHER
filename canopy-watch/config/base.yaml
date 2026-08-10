@@ -1,0 +1,79 @@
+# base.yaml
+# Shared defaults. Never deployed directly — always base.yaml + <profile>.yaml + env vars.
+# Secrets (certs, tokens, keys) are NEVER stored here — reference env var names only.
+
+profile: base
+
+identity:
+  node_id: null            # must be set per-device (env: CW_NODE_ID)
+  org_id: null              # tenant/park identifier
+  site: null
+  zone: null
+
+hardware:
+
+  hardware_tier: null        # constrained | accelerated — read by app code, never inferred from device name
+
+  drivers:
+    camera: null             # driver module name, e.g. mock, webcam, picamera, csi_gstreamer
+    camera_params: {}
+    gpio: null
+    power: null
+
+ai:
+  accelerator: cpu           # cpu | cuda | tensorrt | edgetpu
+  tier1:
+    model_path: null
+    model_format: tflite
+    input_resolution: [320, 320]
+    inference_interval_ms: 200
+  tier2:
+    mode: disabled           # local | defer_to_cloud | disabled
+    model_path: null
+    model_format: null
+
+storage:
+  event_store:
+    path: ./data/events.db
+    journal_mode: WAL
+    write_batch_size: 1
+  retention:
+    max_disk_mb: 2048
+    rotation_policy: oldest_first
+
+networking:
+  event_bus:
+    type: inprocess          # inprocess | redis | mqtt | kafka
+    connection: null
+    topics:
+      detections: edge.detections
+      health: edge.health
+      heartbeat: edge.heartbeat
+  sync:
+    protocol: none            # none | http | mqtt | kafka
+    endpoint: null
+    auth_token_env: null      # name of env var holding the token, never the token itself
+    batch_size: 10
+    compression: none
+    backoff:
+      initial_ms: 1000
+      max_ms: 60000
+      multiplier: 2
+
+health:
+  battery_monitor: false
+  thermal_monitor: false
+  disk_monitor: true
+  connectivity_monitor: true
+  report_interval_s: 60
+
+debug:
+  log_level: info
+  log_destination: stdout
+  log_rotation_mb: null
+  local_api:
+    enabled: false
+    port: 8081
+    auth_required: true
+  simulation_mode: false
+  fixture_data_path: null

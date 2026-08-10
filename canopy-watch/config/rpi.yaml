@@ -1,0 +1,73 @@
+# rpi.yaml — inherits base.yaml, overrides below
+# Scenario: field deployment on Raspberry Pi (CPU-only, SD-card storage, flaky network).
+
+profile: rpi
+
+identity:
+  node_id: null               # set at provisioning, env: CW_NODE_ID
+  org_id: null
+  site: null
+  zone: null
+
+hardware:
+  driver:
+    camera: picamera           # or v4l2 for USB cameras
+    camera_params:
+      device_path: /dev/video0
+      resolution: [640, 480]
+      fps: 10
+    gpio: rpi_gpio
+    power: null                 # set to `ups_hat` only if a UPS HAT is physically installed
+  hardware_tier: constrained   # no CUDA — code must not assume Tier2 real-time capability
+
+ai:
+  accelerator: cpu
+  tier1:
+    model_path: ./models/tier1_int8.tflite   # quantized, sized for CPU inference
+    model_format: tflite
+    input_resolution: [224, 224]
+    inference_interval_ms: 400
+  tier2:
+    mode: defer_to_cloud       # Pi CPU cannot run Tier2 in real time — verified in cloud instead
+    model_path: null
+
+storage:
+  event_store:
+    path: /home/pi/canopy-watch/data/events.db
+    journal_mode: WAL
+    write_batch_size: 5        # batch writes to reduce SD card wear
+  retention:
+    max_disk_mb: 512
+    rotation_policy: oldest_first
+
+networking:
+  event_bus:
+    type: mqtt
+    connection: mqtt://localhost:1883
+  sync:
+    protocol: mqtt
+    endpoint: null              # set at provisioning to field gateway/broker address
+    auth_token_env: CW_SYNC_TOKEN
+    batch_size: 20               # larger batches, fewer transmissions over flaky WiFi
+    compression: gzip
+    backoff:
+      initial_ms: 2000
+      max_ms: 300000             # tolerate long offline stretches
+      multiplier: 2
+
+health:
+  battery_monitor: false        # true only if power.driver = ups_hat
+  thermal_monitor: true         # Pi throttles under sustained load — worth tracking
+  disk_monitor: true
+  connectivity_monitor: true
+  report_interval_s: 120
+
+debug:
+  log_level: warning
+  log_destination: file
+  log_rotation_mb: 10           # rotate to protect SD card from log growth
+  local_api:
+    enabled: true
+    port: 8081
+    auth_required: true
+  simulation_mode: false
