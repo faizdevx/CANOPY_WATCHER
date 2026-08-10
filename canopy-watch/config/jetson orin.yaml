@@ -1,0 +1,78 @@
+# jetson_orin.yaml — inherits base.yaml, overrides below
+# Scenario: field deployment on Jetson Orin (higher compute/storage headroom than Nano).
+
+profile: jetson_orin
+
+identity:
+  node_id: null                # set at provisioning, env: CW_NODE_ID
+  org_id: null
+  site: null
+  zone: null
+
+hardware:
+  driver:
+    camera: csi_gstreamer
+    camera_params:
+      sensor_id: 0
+      resolution: [1920, 1080]
+      fps: 30
+    gpio: jetson_gpio
+    power: jetson_power
+  hardware_tier: accelerated
+
+ai:
+  accelerator: tensorrt
+  tier1:
+    model_path: ./models/tier1_int8.trt
+    model_format: tensorrt
+    input_resolution: [416, 416]
+    inference_interval_ms: 80
+  tier2:
+    mode: local
+    model_path: ./models/tier2_fp16.trt
+    model_format: tensorrt
+
+storage:
+  event_store:
+    path: /home/canopy/data/events.db
+    journal_mode: WAL
+    write_batch_size: 1          # more I/O headroom than Nano/Pi
+  retention:
+    max_disk_mb: 16384
+    rotation_policy: oldest_first
+
+networking:
+  event_bus:
+    type: kafka                  # Orin sites more likely to have broadband backhaul
+    connection: null              # set at provisioning
+  sync:
+    protocol: kafka
+    endpoint: null
+    auth_token_env: CW_SYNC_TOKEN
+    batch_size: 30
+    compression: gzip
+    backoff:
+      initial_ms: 1000
+      max_ms: 60000
+      multiplier: 2
+
+health:
+  battery_monitor: false
+  thermal_monitor: true
+  disk_monitor: true
+  connectivity_monitor: true
+  report_interval_s: 60
+
+debug:
+  log_level: info
+  log_destination: file
+  log_rotation_mb: 100
+  local_api:
+    enabled: true
+    port: 8081
+    auth_required: true
+  simulation_mode: false
+
+ota:
+  model_registry_endpoint: null   # set at provisioning
+  check_interval_s: 1800

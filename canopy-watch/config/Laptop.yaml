@@ -1,0 +1,65 @@
+# laptop.yaml — inherits base.yaml, overrides below
+# Scenario: contributor developing/testing the full pipeline with no physical hardware.
+
+profile: laptop
+
+identity:
+  node_id: dev-laptop-01     # override per contributor via env: CW_NODE_ID
+  org_id: dev-org
+  site: local
+  zone: local
+
+hardware:
+  driver:
+    camera: mock              # switch to `webcam` to use a real laptop camera
+    camera_params:
+      source: fixture          # fixture | device_index
+      fixture_path: ../tests/simulation/fixtures
+      device_index: 0
+    gpio: mock
+    power: mock
+  hardware_tier: accelerated  # dev machines can run both tiers cheaply
+
+ai:
+  accelerator: cpu            # set to cuda if dev box has a GPU
+  tier1:
+    model_path: ./models/tier1_fp32.tflite
+    inference_interval_ms: 100
+  tier2:
+    mode: local                # run locally to exercise the full detection path
+    model_path: ./models/tier2_fp32.onnx
+    model_format: onnx
+
+storage:
+  event_store:
+    path: ./data/dev/events.db
+  retention:
+    max_disk_mb: 1024
+
+networking:
+  event_bus:
+    type: inprocess            # or `redis` if using infra/compose local broker
+    connection: redis://localhost:6379
+  sync:
+    protocol: http
+    endpoint: http://localhost:8080/ingest
+    batch_size: 5
+    backoff:
+      initial_ms: 500
+      max_ms: 5000
+
+health:
+  battery_monitor: false
+  thermal_monitor: false
+  disk_monitor: true
+  connectivity_monitor: false  # assume always-on network
+
+debug:
+  log_level: debug
+  log_destination: stdout
+  local_api:
+    enabled: true
+    port: 8081
+    auth_required: false
+  simulation_mode: true
+  fixture_data_path: ../tests/simulation/fixtures

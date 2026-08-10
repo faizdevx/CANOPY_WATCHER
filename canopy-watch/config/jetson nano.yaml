@@ -1,0 +1,78 @@
+# jetson_nano.yaml — inherits base.yaml, overrides below
+# Scenario: field deployment on Jetson Nano (GPU-accelerated, CSI camera, systemd-managed).
+
+profile: jetson_nano
+
+identity:
+  node_id: null                # set at provisioning, env: CW_NODE_ID
+  org_id: null
+  site: null
+  zone: null
+
+hardware:
+  driver:
+    camera: csi_gstreamer
+    camera_params:
+      sensor_id: 0
+      resolution: [1280, 720]
+      fps: 15
+    gpio: jetson_gpio
+    power: jetson_power          # nvpmodel/tegrastats-backed
+  hardware_tier: accelerated
+
+ai:
+  accelerator: tensorrt
+  tier1:
+    model_path: ./models/tier1_int8.trt
+    model_format: tensorrt
+    input_resolution: [320, 320]
+    inference_interval_ms: 150
+  tier2:
+    mode: local                  # Nano GPU can run Tier2, but budget inference time carefully
+    model_path: ./models/tier2_fp16.trt
+    model_format: tensorrt
+
+storage:
+  event_store:
+    path: /home/canopy/data/events.db
+    journal_mode: WAL
+    write_batch_size: 2
+  retention:
+    max_disk_mb: 4096
+    rotation_policy: oldest_first
+
+networking:
+  event_bus:
+    type: mqtt
+    connection: mqtt://localhost:1883
+  sync:
+    protocol: mqtt               # switch to kafka if node has reliable broadband backhaul
+    endpoint: null                # set at provisioning
+    auth_token_env: CW_SYNC_TOKEN
+    batch_size: 15
+    compression: gzip
+    backoff:
+      initial_ms: 1500
+      max_ms: 120000
+      multiplier: 2
+
+health:
+  battery_monitor: false         # typically mains/solar powered, not battery-only
+  thermal_monitor: true          # Nano throttles under sustained Tier2 load
+  disk_monitor: true
+  connectivity_monitor: true
+  report_interval_s: 60
+
+debug:
+  log_level: info
+  log_destination: file
+  log_rotation_mb: 50
+  local_api:
+    enabled: true
+    port: 8081
+    auth_required: true
+  simulation_mode: false
+
+ota:
+  model_registry_endpoint: null   # set at provisioning
+  check_interval_s: 3600
