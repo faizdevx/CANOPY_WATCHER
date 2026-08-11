@@ -1,0 +1,166 @@
+# =============================================================================
+# capture — merge these blocks into your existing config layers
+#
+# Every key here is POLICY, so it belongs in base.yaml + <profile>.yaml only.
+# Nothing in this section is ever written by scripts/detect_hardware.py — the
+# machine cannot know how many seconds of history your project wants.
+#
+# The one runtime input that is NOT yaml: bytes-per-frame, which comes from the
+# driver's negotiated resolution via get_capabilities(). That is the honest
+# source — the config's requested width/height is only a request.
+# =============================================================================
+
+
+# ------------------------------- base.yaml -----------------------------------
+capture:
+  # What you want.
+  buffer_seconds: 30
+
+  # What you actually get. THIS WINS.
+  #   1920x1080x3 = 6.2 MB/frame; 30 fps x 60 s = 11.2 GB.
+  #   Jetson Nano has 4 GB shared CPU/GPU. Pi has 2-8 GB.
+  # The service derives the real depth from live frame size at startup and logs
+  # it in actual numbers, so the limit is discovered in a log line rather than
+  # by an OOM kill on a node in a forest at 3am.
+  buffer_max_memory_mb: 512
+
+  # Time-based, not "every Nth frame" — a modulo counter silently changes rate
+  # when the camera negotiates a different fps than requested.
+  tier1_sample_interval_ms: 200
+
+  # Drop-oldest. Depth 1 = latest-frame-wins, correct for real-time detection.
+  # Raise only if Tier1 batches. Dropped frames stay retrievable from the buffer.
+  tier1_queue_depth: 1
+
+  # Camera dropout recovery. Last value repeats forever.
+  reopen_backoff_s: [1, 2, 5, 10, 30]
+  max_reopen_attempts: 0        # 0 = never give up (correct for field devices)
+
+
+# ------------------------------ laptop.yaml ----------------------------------
+# Dev box: RAM is cheap, iteration speed matters, dropouts are USB replugs.
+capture:
+  buffer_seconds: 30
+  buffer_max_memory_mb: 2048
+  tier1_sample_interval_ms: 100
+  reopen_backoff_s: [1, 2]
+  max_reopen_attempts: 5        # fail visibly on a dev box instead of hanging
+
+
+# ------------------------------- rpi.yaml ------------------------------------
+# hardware_tier: constrained. Tier1-only, so the buffer exists mainly to serve
+# a deferred-to-cloud Tier2. Memory is the binding constraint, not seconds.
+capture:
+  buffer_seconds: 15
+  buffer_max_memory_mb: 128
+  tier1_sample_interval_ms: 500     # CPU-only inference; do not oversubscribe
+  tier1_queue_depth: 1
+  reopen_backoff_s: [2, 5, 15, 60]
+
+
+# ---------------------------- jetson_nano.yaml -------------------------------
+# 4 GB shared between CPU and GPU — the GPU needs most of it for Tier2.
+capture:
+  buffer_seconds: 20
+  buffer_max_memory_mb: 384
+  tier1_sample_interval_ms: 200
+  reopen_backoff_s: [2, 5, 15, 60]
+
+
+# ---------------------------- jetson_orin.yaml -------------------------------
+capture:
+  buffer_seconds: 30
+  buffer_max_memory_mb: 1024
+  tier1_sample_interval_ms: 100
+  reopen_backoff_s: [2, 5, 15, 60]
+
+
+# ------------------------- driver-side additions -----------------------------
+# Only the CSI paths have a real sensor timestamp. Capture reports it as null
+# everywhere else and NEVER backfills it from the receive time.
+#
+# rpi.yaml:
+#   hardware:
+#     camera_params:
+#       report_sensor_timestamp: true   # uses capture_request() so pixels and
+#                                       # metadata come from the same request
+#
+# Env overrides work as before, e.g.:
+#   CW__capture__buffer_max_memory_mb=256
+#   CW__capture__tier1_sample_interval_ms=1000
+
+
+# =============================================================================
+# Additions for the video-file driver (offline analysis / evaluation)
+# =============================================================================
+
+# --------------------------- video.yaml (new profile) ------------------------
+# A profile for replaying recorded footage through the real pipeline. Not a
+# field profile — but it uses the identical code path, which is the point.
+identity:
+  node_id: video-analysis-01
+  zone: core
+
+hardware:
+  driver:
+    camera: video
+  camera_params:
+    path: clips/incident.mp4
+    loop: false          # finite ON PURPOSE — we want the run to END
+    realtime: false      # false = flat out (batch); true = pace to file fps
+    speed: 1.0           # only meaningful when realtime: true
+    frame_stride: 1      # process every Nth decoded frame
+    start_frame: 0
+    # end_frame: 900
+    # width/height: downscale 4K footage to a Pi-sized pipeline
+    # width: 1280
+    # height: 720
+
+capture:
+  buffer_seconds: 15
+  buffer_max_memory_mb: 256
+
+  # Gate sampling on the CLIP's timeline, not the wall clock. An 8s clip that
+  # replays in 1.4s of real time would otherwise be sampled 7 times instead of
+  # 40, and most of the footage never examined.
+  #   wall  = elapsed real time (correct for a live camera)
+  #   media = the source's own presentation timestamps (correct for a file)
+  #   auto  = media when the driver provides it, wall when it doesn't
+  tier1_sample_clock: media
+
+  # A file will wait; it is not "ahead" of the consumer. Dropping here makes the
+  # run non-deterministic — which sampled frame Tier1 sees would depend on
+  # thread scheduling — and silently skips footage.
+  #   drop_oldest = stay current (correct for a live camera)
+  #   block       = lose nothing, stay reproducible (correct for a file)
+  tier1_backpressure: block
+
+snapshots:
+  enabled: true
+  directory: out/snapshots
+  mode: crop           # crop | frame | both
+  format: jpg
+  min_band: low        # only persist at or above this risk band
+  max_files: 500       # bounded: an SD card that fills at 3am is an outage
+  max_megabytes: 200
+
+
+# ------------------- snapshots for the field profiles ------------------------
+# base.yaml — off by default. Events carry a snapshot_ref, never image bytes.
+snapshots:
+  enabled: false
+  directory: snapshots
+  mode: crop
+  min_band: high
+  max_files: 200
+  max_megabytes: 100
+
+# rpi.yaml — SD-card write cycles are the constraint here.
+snapshots:
+  enabled: false
+
+# jetson_orin.yaml
+snapshots:
+  enabled: true
+  min_band: high
+  max_megabytes: 500

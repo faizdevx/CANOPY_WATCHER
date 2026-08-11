@@ -524,3 +524,388 @@ All drivers generate the same CameraDriver output and thus the same input format
 
 ```
 
+# Capture Service 
+
+Get frames from the camera driver, store what the frame is and when it occurred, have some history of the last few frames, give new frames to Tier 1, and then get back the precise frame that Tier 1 saw something in
+
+
+```
+
+CAMERA DRIVER
+     │
+     │ gives RGB frames
+     ▼
+CAPTURE SERVICE
+     │
+     ├── gives each frame an ID
+     ├── records timestamps
+     ├── stores recent frames
+     ├── selects frames for Tier 1
+     └── retrieves frames by ID
+             │
+             ▼
+           TIER 1
+             │
+             │ "animal + bbox"
+             ▼
+       request original frame
+             │
+             ▼
+      CAPTURE SERVICE
+             │
+             ▼
+      original frame + bbox
+             │
+             ▼
+           TIER 2
+
+```
+
+
+The Capture Service lives between the camera driver and Tier 1; it provides information about frames. It does not do object detection, it does not resize images, and it does not know about the AI model.
+
+The camera driver is responsible for all the camera-specific logic, providing the Capture Service with a canonical RGB uint8 frame. The driver handles decoding, color spaces, hardware timestamps, etc. The Capture has no knowledge about cameras: it does not care if it is a webcam, CSI camera, or an RTSP stream, or that it provides 15, 30, or 60 FPS.
+
+The Capture adds a unique ID to each frame: it is a combination of the source ID and the sequence number known only to the Capture, for example, cam01-000184392. The sequence number belongs to the Capture: the driver’s frame index is reset when the camera is disconnected and is not available anymore. The Capture timestamp can be used to determine the frame order across reboots.
+
+A frame can have three timestamps:
+
+media_timestamp: indicates when the frame was captured by a sensor and can be absent if not provided by the driver
+
+received_timestamp: indicates the moment when the frame was received by the Capture using a monotonic clock. This timestamp is useful to calculate latency.
+
+wall_clock: represents the current UTC time and is used to persist events to a database, logs, or for communication with external systems.
+
+A missing media timestamp should not be guessed using another timestamp.
+
+The Capture keeps a rolling buffer with the most recent original frames. When a new frame comes, it is added to the buffer, and the old one is discarded. The rolling buffer is mainly needed so that when Tier 1 detects an object, Capture can provide the original frame to Tier 2.
+
+The buffer size should not be able to hold more than a minute of 1080p original frames. Assuming 6.2MB per 1920×1080 RGB frame, 30 FPS, and 60 seconds per minute, we get about 11GB per minute. The buffer should have a configurable retention time and memory size: the memory size has higher priority. For example, the system may want to keep the last 30 seconds, but if the system only has enough memory for 3 seconds, this is the hard limit. The longer video history should be stored in an encoded form in a video archive accessible to other services.
+
+The Capture also selects which frames to pass to Tier 1. Suppose the camera provides 30 FPS, but only 5 FPS are needed; in that case, the Capture will drop the remaining 25 FPS. This should be done in time-based frames, not in every N-th frame, to handle cases when the camera FPS changes.
+
+The Capture does not resize the image; it passes the canonical frame to Tier 1. Tier 1 is aware that it needs to perform resizing to, say, 320×320, so that the model can process it. It allows Capture to be ignorant of the model and its requirements.
+
+The Tier 1 gets a frame from Capture, does some object detection, and returns a detection result with the frame ID to Tier 2. It can return information such as animal, confidence of 0.94, a bounding box, and the frame ID, for example, cam01-000184392.
+
+The frame ID is critical; it allows Tier 2 to get the original frame from the Capture buffer. The Tier 1 result is placed in the Tier 2 queue. The Tier 2 gets this result and requests the original frame using the frame ID from the Capture buffer. It then crops the original image using the bounding box provided by the Tier 1 and passes this cropped frame to the Tier 2.
+
+The sequence is as follows: the camera provides a frame to the Capture, which assigns the frame an ID and a timestamp and saves the original frame to the buffer. Then, Tier 1 gets a frame from the Capture buffer, does the object detection, and returns the results with the frame ID to Tier 2. Tier 2 asks for the original frame using the frame ID, gets it from Capture, crops the detected object using the bounding box, and provides this cropped object to Tier 2.
+
+The Tier1 queue should only hold a small number of frames, ideally 1. If Tier1 starts dropping frames, old frames in the queue are removed when new ones come in; only the most recent frame is kept. This way, Tier1 is always processing the latest frames without waiting for older ones. At the same time, the dropped frames should be tracked so that the system knows that something is wrong, and Tier1 is too slow.
+
+If the camera is disconnected while working, the Capture should close the driver, wait for some time (backoff), and reconnect; the sequence numbers are retained, so the Capture knows which frames have already been processed. However, the buffer with original frames is not cleared, and the Tier1 queue is cleared because all the frames there are now outdated.
+
+The original frames in the rolling buffer are write-once, so that the memory can be shared between other processes if possible. Other services, including Tier1, get pointers to the original image data, not the copies of it, because these frames are the source of truth. If a service, such as Tier2, needs to modify the image, it should make a copy of the cropped region before making any changes. This way, other services continue to see the original image data.
+
+Overall, the system is straightforward; all logic is in the Capture. It remembers what every frame is, when it was received, and where it is. All the Tier1 knows is that it has to process a certain canonical frame; it does not know where it came from. Once it finds the object in the frame, it tells Tier2 about it by giving the frame ID. Using this ID, Tier2 gets the original frame from Capture, crops the object using the bounding box, and passes it to Tier2.
+
+
+```
+                  CAMERA
+                    │
+                    ▼
+              Capture Service
+                    │
+        ┌───────────┼────────────┐
+        │           │            │
+        ▼           ▼            ▼
+       ID       timestamp      buffer
+        │
+        ▼
+     Tier 1
+        │
+        │ "animal + bbox + ID"
+        ▼
+     Capture
+        │
+        │ "give me that exact ID"
+        ▼
+   Original frame
+        │
+        │ crop using bbox
+        ▼
+     Tier 2
+
+```
+
+The Capture Service comprises four files. Each file is responsible for a particular aspect to avoid having a single service.py file with all the code.
+
+frame.py
+
+This file defines what a captured frame is. It stores the image data alongside the identity and time details.
+
+It handles frame_id, media_timestamp, received_timestamp, wall_clock, and the frame metadata. It also makes sure the stored image is read-only to avoid unnecessary modifications.
+
+Simple explanation:
+
+frame.py – What is this frame about?
+
+buffer.py
+
+This file handles the buffer of recent frames. It stores the captured frames, discards the old ones when the memory or time is exceeded, and provides a way to access a frame given the frame_id.
+
+It also manages the three cases – frame available, frame expired, and frame unavailable.
+
+Simple explanation:
+
+buffer.py – What recent frames do we have?
+
+sampler.py
+
+This file determines which frames are to be passed to Tier 1. The camera may be capturing at 30 FPS, but Tier 1 only needs 5 FPS.
+
+The sampler uses a time-based approach to capture the required number of frames instead of relying on the FPS provided by the camera driver. It also manages the small buffer for the Tier 1 queue to ensure that the latest frame is prioritized when there is a lag in the camera capture rate.
+
+Simple explanation:
+
+sampler.py – What frame does Tier 1 need?
+
+service.py
+
+This file defines the Capture Service. It connects all the components, provides a way to receive frames from the camera driver, adds IDs and timestamps to the captured frames, manages the buffer, processes the frames to be passed to Tier 1, handles the frame retrieval requests, manages camera reconnection, and provides health details.
+
+It oversees the frame.py , buffer.py , and sampler.py files.
+
+Simple explanation:
+
+service.py – Run the Capture Service.
+
+## operational thing
+
+confirm the actual camera 
+
+```
+python scripts/camera_probe.py --driver webcam --frames 30
+
+```
+
+now run capture service 
+
+```
+
+python -m edge.capture
+
+python -m edge --config config/laptop.yaml
+
+```
+
+for each service it depend 
+
+Laptop
+
+```
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+pytest tests/unit/ -v
+
+python -m edge --config config/laptop.yaml
+
+```
+
+rasberry pi 
+
+```
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+pytest tests/unit/ -v
+
+python -m edge --config config/raspberry_pi.yaml
+
+```
+
+jetson
+
+```
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+pytest tests/unit/ -v
+
+python -m edge --config config/jetson.yaml
+
+```
+you do not have to run this again again 
+if you want to specfically changes the particular service you can go for thing and test the service
+
+
+# TIER 1/TIER 2 
+
+## Tier 1 Detection
+
+Tier 1 is the first stage of detection. Its job is to quickly check incoming frames and identify anything that might be worth investigating further.
+
+The main goal here is **speed and filtering**, not perfect identification.
+
+The flow is:
+
+```text
+Frame
+  ↓
+Motion gate (optional)
+  ↓
+Tier 1 detector
+  ↓
+Candidate
+```
+
+A `Candidate` contains basic information such as the detected category, confidence, and bounding box.
+
+Tier 1 uses a coarse category system instead of trying to identify every possible species. This keeps the first stage lightweight and allows Tier 2 to do the more detailed verification.
+
+Bounding boxes are stored using normalized coordinates rather than raw pixels. This keeps detections independent of the resolution of the original image.
+
+---
+
+## Tier 2 Verification
+
+Tier 2 takes the candidates produced by Tier 1 and performs a more detailed verification.
+
+Instead of running expensive verification on every frame, only the regions identified by Tier 1 are passed forward.
+
+```text
+Tier 1 Candidate
+      ↓
+Crop the relevant region
+      ↓
+Tier 2 verifier
+      ↓
+Verification
+```
+
+The crop is created while the original frame is still available. This is important because the capture buffer may no longer contain that frame later.
+
+Tier 1 and Tier 2 use separate interfaces because they perform different jobs:
+
+* **Tier 1:** find something potentially interesting.
+* **Tier 2:** verify what that something actually is.
+
+---
+
+## Risk Scoring
+
+After detection and verification, the system calculates a risk score.
+
+The risk scorer uses deterministic rules and weighted factors instead of another AI model.
+
+This is intentional. The same inputs should always produce the same score, and the reason behind a score should be understandable.
+
+A score can therefore be broken down into factors such as:
+
+```text
+Detection confidence
+Object/category
+Movement
+Location/context
+Other configured risk factors
+```
+
+The scorer also provides an explanation for the result instead of returning only a single unexplained number.
+
+This makes the final alert easier to understand and debug.
+
+---
+
+## Detection Events
+
+Once the detection has been processed, the result is converted into a `DetectionEvent`.
+
+The event is the standard format used by the rest of the system.
+
+It contains information such as:
+
+* Event ID
+* Timestamp
+* Detection information
+* Normalized bounding box
+* Risk score
+* Tier 2 status
+* Schema version
+
+The event schema is treated as a stable contract because events may be stored locally before they are synchronized elsewhere.
+
+Schema versioning is therefore included from the beginning rather than added later.
+
+---
+
+## Pipeline
+
+The pipeline connects all the stages together:
+
+```text
+Camera Driver
+     ↓
+Capture Service
+     ↓
+Tier 1
+     ↓
+Tier 2
+     ↓
+Risk Scorer
+     ↓
+DetectionEvent
+     ↓
+EventBus
+     ↓
+Storage / Alerts / Other Subscribers
+```
+
+Each stage has a specific responsibility and communicates with the next stage through a defined interface.
+
+The pipeline also uses queues between processing stages.
+
+The queue policies are chosen based on the cost of the work already performed. Dropping an unused camera frame is different from dropping work that Tier 1 has already spent time processing.
+
+This is especially important when Tier 2 is slower than Tier 1.
+
+---
+
+## Video File Driver
+
+The system also supports analysing recorded video files such as MP4s.
+
+The video driver follows the same capture interface as the other camera drivers, so the rest of the pipeline does not need to know whether a frame came from a live camera or a video file.
+
+The main difference is that a video file has a definite end.
+
+```text
+Video file
+   ↓
+Frames
+   ↓
+End of stream
+   ↓
+Clean shutdown
+```
+
+End-of-stream is treated as a normal completion condition, not as a camera failure.
+
+For recorded video, frame sampling uses the video's media timestamp rather than the computer's wall clock. This prevents fast playback or processing from causing large parts of the video to be skipped.
+
+Video processing also uses blocking backpressure where reproducibility is required, so running the same recording multiple times produces consistent results.
+
+---
+
+## Testing
+
+The system is tested around failure cases as well as normal operation.
+
+Important cases include:
+
+* Camera opens but never produces a valid frame
+* Camera disconnects during capture
+* Capture buffer expires before Tier 2 uses the frame
+* Tier 2 is slower than Tier 1
+* End of a video file
+* Repeated analysis of the same video
+* False detections on an empty/background-only video
+
+The goal of the tests is not just code coverage. Each test protects against a specific failure mode that could otherwise reappear during future changes.
+
+At the current stage, the project has **159 passing tests**.

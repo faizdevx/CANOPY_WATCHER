@@ -50,6 +50,19 @@ class CameraNotOpenError(CameraError):
     """read_frame() was called before a successful open()."""
 
 
+class CameraEndOfStream(CameraError):
+    """The source is finite and has been fully consumed.
+
+    A live camera never raises this — there is always another frame coming, and
+    a failure to produce one is a fault to recover from. A video file is
+    different: reaching the end is SUCCESS, not an error, and the Capture
+    Service must shut down cleanly rather than enter its reconnect loop and
+    reopen the same file forever.
+
+    This distinction is the whole reason the exception exists as its own type.
+    """
+
+
 # --------------------------------------------------------------------------- #
 # Canonical frame
 # --------------------------------------------------------------------------- #
@@ -195,6 +208,10 @@ class CameraDriver(abc.ABC):
             attempts += 1
             try:
                 arr = self._read()
+            except CameraEndOfStream:
+                # A source that ends DURING warm-up is empty or truncated. Let
+                # it through untouched — retrying cannot produce more frames.
+                raise
             except Exception as exc:
                 last_reason = f"read raised: {exc}"
                 continue
@@ -246,6 +263,12 @@ class CameraDriver(abc.ABC):
         for _ in range(max(1, self.read_retries)):
             try:
                 arr = self._read()
+            except CameraEndOfStream:
+                # MUST propagate untouched. Retrying is pointless, and worse,
+                # wrapping it in CameraReadError makes the Capture Service treat
+                # a finished video file as a camera dropout — which reconnects,
+                # reopens the same file, and never terminates.
+                raise
             except Exception as exc:
                 last_exc = exc
                 continue
