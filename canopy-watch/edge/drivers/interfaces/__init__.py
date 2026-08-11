@@ -1,5 +1,6 @@
 from .camera import (
     CameraDriver,
+    CameraEndOfStream,
     CameraError,
     CameraNotOpenError,
     CameraOpenError,
@@ -10,6 +11,7 @@ from .camera import (
 
 __all__ = [
     "CameraDriver",
+    "CameraEndOfStream",
     "CameraError",
     "CameraNotOpenError",
     "CameraOpenError",

@@ -33,6 +33,7 @@ CAMERA_REGISTRY: Dict[str, Tuple[str, str]] = {
     "webcam":        ("edge.drivers.webcam",                "WebcamDriver"),
     "picamera":      ("edge.drivers.rpi.picamera",          "PiCameraDriver"),
     "csi_gstreamer": ("edge.drivers.jetson.csi_gstreamer",  "JetsonCSIDriver"),
+    "video": ("edge.drivers.video", "VideoFileDriver"),
 }
 
 

@@ -220,8 +220,14 @@ def test_non_canonical_array_is_rejected():
 # Factory / registry
 # --------------------------------------------------------------------------- #
 
-def test_registry_contains_the_four_drivers():
-    assert available_drivers() == ("csi_gstreamer", "mock", "picamera", "webcam")
+def test_registry_contains_the_camera_drivers():
+    assert available_drivers() == (
+        "csi_gstreamer",
+        "mock",
+        "picamera",
+        "video",
+        "webcam",
+    )
 
 
 def test_unknown_driver_names_the_valid_options():

@@ -14,6 +14,7 @@ from .factory import (
 )
 from .interfaces.camera import (
     CameraDriver,
+    CameraEndOfStream,
     CameraError,
     CameraNotOpenError,
     CameraOpenError,
@@ -24,6 +25,7 @@ from .interfaces.camera import (
 __all__ = [
     "CAMERA_REGISTRY",
     "CameraDriver",
+    "CameraEndOfStream",
     "CameraError",
     "CameraNotOpenError",
     "CameraOpenError",
