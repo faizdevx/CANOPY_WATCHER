@@ -909,3 +909,399 @@ Important cases include:
 The goal of the tests is not just code coverage. Each test protects against a specific failure mode that could otherwise reappear during future changes.
 
 At the current stage, the project has **159 passing tests**.
+
+
+# Operational Notes: Running Canopy Watch on a Laptop with an MP4
+
+This walkthrough takes you from a fresh checkout to a complete Canopy Watch run using an MP4 file. You do not need a GPU, camera, or model files to get the basic pipeline working. The default Tier 1 and Tier 2 heuristic backends run locally using NumPy.
+
+Real models are optional and can be added later.
+
+## 1. Prerequisites
+
+Check that Python is installed:
+
+```bash
+python3 --version
+```
+
+Python 3.9 or newer is fine.
+
+It is also worth updating pip:
+
+```bash
+pip install --upgrade pip
+```
+
+You do not need a GPU, camera, or downloaded model files for this walkthrough.
+
+---
+
+## 2. Get the Repository and Install Dependencies
+
+From the repository directory:
+
+```bash
+cd canopy-watch
+pip install numpy opencv-python jsonschema
+```
+
+OpenCV is required because it handles reading the MP4 and writing snapshot crops.
+
+`jsonschema` is technically optional because the event validator has a structural fallback, but installing it gives you more useful validation errors.
+
+---
+
+## 3. Run the Tests First
+
+Before touching any video, make sure the environment itself is working:
+
+```bash
+python -m pytest tests/ -q
+```
+
+You should get:
+
+```text
+159 passed
+```
+
+If this fails before you have changed anything, treat it as an environment or installation problem first. There is no point debugging your video when the test suite is already on fire.
+
+---
+
+## 4. Get an MP4 to Analyze
+
+There are two straightforward options.
+
+### Option A: Generate Test Footage
+
+If you do not have footage available, generate the synthetic test clip:
+
+```bash
+python scripts/make_test_video.py --seconds 15
+```
+
+This creates:
+
+```text
+tests/fixtures/test_clip.mp4
+```
+
+The clip contains a bright subject moving across a dark background. The subject enters around 20% of the way through the video and leaves around 80%.
+
+It is useful for verifying the complete pipeline before introducing real-world footage.
+
+### Option B: Use Real Footage
+
+For example:
+
+```bash
+cp ~/Downloads/trail_cam_incident.mov clips/incident.mp4
+```
+
+If OpenCV later reports that it cannot open the file, the codec is usually the problem rather than the file container.
+
+You can re-encode it with FFmpeg:
+
+```bash
+ffmpeg -i ~/Downloads/trail_cam_incident.mov \
+    -c:v libx264 \
+    -pix_fmt yuv420p \
+    clips/incident.mp4
+```
+
+---
+
+## 5. First Run: Keep It Simple
+
+Run the generated test clip:
+
+```bash
+python scripts/analyze_video.py tests/fixtures/test_clip.mp4
+```
+
+You should see output roughly like:
+
+```text
+test_clip.mp4: 225 frames @ 15.0 fps (15.0s), tier1=heuristic tier2=heuristic/local motion_gate=off
+
+   3.20s  [MEDIUM  ]  51.2  unknown  conf=0.99  video-analysis-01-000000048  top=confidence
+   3.40s  [MEDIUM  ]  53.7  unknown  conf=0.99  video-analysis-01-000000051  top=confidence
+   ...
+
+--- summary ---
+wall clock         2.1s
+frames captured    224
+frames to tier1    75
+candidates         46
+events             46
+risk bands         {'medium': 40, 'high': 6}
+peak score         62.3
+```
+
+A few things are worth understanding here.
+
+**`frames to tier1`** is the number of frames actually examined. The default sampling interval is based on the video's timeline, not how quickly your laptop happens to process the video.
+
+**`candidates` and `events` matching** means nothing was lost between candidate detection and event generation.
+
+If `events` is zero, that does not automatically mean the pipeline is broken. The heuristic detector relies on brightness and blob-like motion, so a flat or low-contrast clip may simply contain nothing it can detect.
+
+---
+
+## 6. Run It Properly and Save the Results
+
+Once the basic run works, save the outputs you will want to inspect later:
+
+```bash
+mkdir -p out
+
+python scripts/analyze_video.py tests/fixtures/test_clip.mp4 \
+    --snapshots out/snapshots \
+    --events out/events.jsonl \
+    --tz 5.5
+```
+
+The `--tz 5.5` setting represents UTC+5:30, or IST.
+
+This matters because the timezone is used by the `nocturnal` risk factor. If you care about the actual risk score, use the correct timezone rather than treating it as decorative configuration.
+
+Now inspect the generated files:
+
+```bash
+ls out/snapshots/
+```
+
+And inspect the first event:
+
+```bash
+cat out/events.jsonl | head -1 | python -m json.tool
+```
+
+Each JSON line contains the complete `DetectionEvent`, including:
+
+* category
+* confidence
+* bounding box
+* risk-factor breakdown
+* human-readable risk reasons
+* `snapshot_ref` pointing to the corresponding crop
+
+---
+
+## 7. Inspect an Actual Detection
+
+Open one of the generated snapshots.
+
+On macOS:
+
+```bash
+open out/snapshots/video-analysis-01-000000048.jpg
+```
+
+On Linux:
+
+```bash
+xdg-open out/snapshots/video-analysis-01-000000048.jpg
+```
+
+This is probably the most useful sanity check in the entire workflow.
+
+If the crop clearly contains the subject, the detection pipeline is behaving sensibly even without a real ML model.
+
+If the crop is mostly empty background, gray padding, or random noise, the Tier 1 threshold may be too loose or the heuristic detector may be responding to irrelevant motion.
+
+A pipeline producing technically valid JSON while detecting absolutely nothing useful is still broken in the way that matters to humans.
+
+---
+
+## 8. Run a Negative Control
+
+You also need to know how the system behaves when there is definitely no subject.
+
+Generate an empty clip:
+
+```bash
+python scripts/make_test_video.py \
+    --empty \
+    --out tests/fixtures/empty_clip.mp4
+```
+
+Then analyze it:
+
+```bash
+python scripts/analyze_video.py tests/fixtures/empty_clip.mp4 -q
+```
+
+This clip contains only the background.
+
+Therefore:
+
+```text
+candidates > 0
+```
+
+is a false positive.
+
+This is the number to watch when tuning thresholds. Increasing detections is meaningless if false positives increase at the same time.
+
+---
+
+## 9. Understand File-Specific Sampling and Backpressure
+
+For file-based testing, two options are particularly important:
+
+```bash
+python scripts/analyze_video.py clip.mp4 \
+    --sample-clock media \
+    --backpressure block
+```
+
+These are already the CLI defaults, but it is worth understanding why.
+
+### `--sample-clock media`
+
+Sampling follows the video's own timeline rather than wall-clock time.
+
+This matters when a file is processed faster than real time.
+
+For example, suppose an 8-second video takes only 1.4 seconds to process. Sampling based on wall time could result in roughly seven samples instead of the roughly 40 samples expected from a 200 ms media-time interval.
+
+Using the media clock makes file analysis independent of how quickly the laptop happens to process the video.
+
+### `--backpressure block`
+
+This prevents frames from being dropped while Tier 1 is catching up.
+
+That gives you repeatable results when analyzing the same file multiple times.
+
+Reproducibility is one of the main reasons to test against a file instead of a live camera. A live camera has enough sources of chaos already without adding your pipeline to the list.
+
+---
+
+## 10. Tune the Threshold
+
+Once the basic pipeline is working, compare several thresholds:
+
+```bash
+for t in 0.3 0.45 0.6; do
+  echo "--- threshold $t ---"
+  python scripts/analyze_video.py clip.mp4 \
+      --threshold $t \
+      -q | grep -E "candidates|events"
+done
+```
+
+Because file processing is deterministic, differences between these runs should primarily reflect the threshold change rather than timing differences.
+
+When tuning, do not look only at how many detections you get. Compare the results against the negative-control clip from Step 8.
+
+---
+
+## 11. Try the Motion Gate
+
+The motion gate is disabled by default on a laptop:
+
+```bash
+python scripts/analyze_video.py clip.mp4 --motion-gate -q
+```
+
+Compare this run with the same command without `--motion-gate`.
+
+Pay particular attention to:
+
+* `frames_examined`
+* `candidates`
+
+The motion gate is intended to avoid running inference on static frames.
+
+The tradeoff is straightforward: if a real subject is stationary, the motion gate can suppress it.
+
+That is expected behavior, not necessarily a bug.
+
+---
+
+## 12. Optional: Use a Real Model
+
+Once the heuristic pipeline is working, you can replace Tier 1 with a real model.
+
+First see what models are available:
+
+```bash
+python scripts/fetch_models.py --list
+```
+
+Fetch the Tier 1 model:
+
+```bash
+python scripts/fetch_models.py --only tier1
+```
+
+Install an interpreter:
+
+```bash
+pip install tensorflow
+```
+
+Alternatively, use `tflite-runtime` if that is what your environment supports.
+
+Then run:
+
+```bash
+python scripts/analyze_video.py clip.mp4 \
+    --tier1 tflite_ssd \
+    --tier1-model models/ssd_mobilenet_v2_coco_int8.tflite
+```
+
+The important part is that the rest of the pipeline does not change.
+
+You keep the same:
+
+* CLI
+* event schema
+* risk scoring
+* snapshot handling
+* downstream processing
+
+Only the Tier 1 driver changes.
+
+That is the practical test of whether the driver-swap architecture is actually doing what it claims to do.
+
+---
+
+## 13. Troubleshooting
+
+| Symptom                                 | Likely cause                                                      | Fix                                                                                                                                                   |
+| --------------------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OpenCV could not open <file>`          | Unsupported codec                                                 | Re-encode with `ffmpeg -c:v libx264 -pix_fmt yuv420p`                                                                                                 |
+| Script hangs and never prints a summary | Old build without the `CameraEndOfStream` fix                     | Check that `edge/drivers/interfaces/camera.py` re-raises `CameraEndOfStream` before the generic `except Exception` in both `_warmup` and `read_frame` |
+| Two runs produce different detections   | `--backpressure drop_oldest` was explicitly enabled               | Remove it or use `--backpressure block`                                                                                                               |
+| `candidates: 0` on real footage         | Threshold is too high, or there is genuinely no detectable motion | Lower `--threshold` and verify with `--motion-gate` disabled                                                                                          |
+| `frames dropped` appears in the summary | Backpressure is dropping frames                                   | Use `--backpressure block`                                                                                                                            |
+
+---
+
+## 14. What "Done" Looks Like
+
+A successful end-to-end run should leave you with:
+
+```text
+out/events.jsonl
+out/snapshots/*.jpg
+```
+
+The event file should contain schema-valid detection events.
+
+The snapshot directory should contain visual evidence for detections above the configured minimum risk band.
+
+You should also have:
+
+* a false-positive baseline from the empty clip
+* a repeatable command line
+* deterministic results when running the same MP4
+* confidence that the pipeline works before introducing real models
+
+At that point, you have tested the actual workflow rather than merely proving that Python can open a file.
+
+The final goal is simple: someone else should be able to take the same MP4, run the same command, and get the same output.
