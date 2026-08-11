@@ -85,17 +85,47 @@ class TimeBasedSampler:
 
 
 class LatestFrameQueue:
-    """Bounded queue that discards the OLDEST item when full."""
+    """Bounded queue with a configurable full-queue policy.
 
-    def __init__(self, depth: int = 1) -> None:
+    `drop_oldest` (default) is right for a LIVE camera: there is always another
+    frame 33 ms behind, so shed the stale one and stay current.
+
+    `block` is right for a FINITE source. A video file is not "ahead" of the
+    consumer in any meaningful sense — it will wait. Dropping there makes the
+    run non-deterministic (which sampled frame Tier1 actually sees depends on
+    thread scheduling) and silently skips footage, which defeats the point of
+    evaluating on a recording: a threshold change must be attributable to the
+    threshold, not to how busy the machine was that afternoon.
+    """
+
+    def __init__(self, depth: int = 1, policy: str = "drop_oldest") -> None:
         self.depth = max(1, int(depth))
+        if policy not in ("drop_oldest", "block"):
+            raise ValueError(
+                f"tier1 queue policy must be drop_oldest|block, got {policy!r}")
+        self.policy = policy
         self._q: "queue.Queue[CapturedFrame]" = queue.Queue(maxsize=self.depth)
         self._lock = threading.Lock()
+        self._closed = threading.Event()
         self.dropped = 0
         self.delivered = 0
+        self.blocked_waits = 0
+
+    def close(self) -> None:
+        """Release any producer blocked in put() so shutdown cannot deadlock."""
+        self._closed.set()
 
     def put(self, frame: CapturedFrame) -> bool:
-        """Returns False if something older had to be discarded to make room."""
+        """False if something was dropped (or the queue closed while blocking)."""
+        if self.policy == "block":
+            while not self._closed.is_set():
+                try:
+                    self._q.put(frame, timeout=0.1)
+                    return True
+                except queue.Full:
+                    self.blocked_waits += 1
+            return False
+
         with self._lock:
             made_room = False
             while True:
@@ -132,7 +162,9 @@ class LatestFrameQueue:
     def stats(self) -> Dict[str, Any]:
         return {
             "depth": self.depth,
+            "policy": self.policy,
             "queued": self.qsize(),
             "delivered": self.delivered,
+            "blocked_waits": self.blocked_waits,
             "frames_dropped_backpressure": self.dropped,
         }

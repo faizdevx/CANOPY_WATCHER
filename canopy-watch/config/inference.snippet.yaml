@@ -1,0 +1,177 @@
+# =============================================================================
+# ai / scoring / pipeline — merge into your existing config layers
+#
+# All POLICY: base.yaml + <profile>.yaml only. detect_hardware.py writes exactly
+# one fact that these read — `ai.accelerator` — and nothing else here.
+#
+# The two fields application code branches on are `ai.tier2.mode` and
+# `hardware.hardware_tier`. Never the device name.
+# =============================================================================
+
+
+# ------------------------------- base.yaml -----------------------------------
+ai:
+  accelerator: cpu              # FACT, written by detect_hardware.py
+
+  tier1:
+    backend: heuristic          # heuristic | tflite_ssd
+    score_threshold: 0.45
+    max_detections: 10
+    default_category: unknown
+
+    # A detector reads ONE frame and cannot know anything moved. The gate is
+    # frame differencing. Cost: a motionless subject is invisible to it — a
+    # poacher standing still is exactly what you most want to catch. So it is
+    # OFF where power is free and ON where it isn't.
+    motion_gate:
+      enabled: false
+      downsample_stride: 8
+      pixel_threshold: 18
+      min_area_fraction: 0.002
+      max_area_fraction: 0.6     # whole-frame change = exposure step, not an animal
+      learning_rate: 0.05
+      warmup_frames: 10
+
+    # COCO has no deer, no tiger, no poacher. Tier1 is coarse triage, so its
+    # 80 classes project onto four buckets. Retraining on park data changes
+    # this map, not the code.
+    class_map:
+      person: human
+      bicycle: vehicle
+      car: vehicle
+      motorcycle: vehicle
+      bus: vehicle
+      truck: vehicle
+      bird: animal
+      cat: animal
+      dog: animal
+      horse: animal
+      sheep: animal
+      cow: animal
+      elephant: animal
+      bear: animal
+      zebra: animal
+      giraffe: animal
+
+  tier2:
+    mode: local                 # local | defer_to_cloud | disabled
+    backend: heuristic          # heuristic | onnx
+    input_size: 260             # EfficientNet-B2
+    min_confidence: 0.0
+    default_category: unknown
+
+scoring:
+  # Deterministic arithmetic. Same detection + same context = same score, always.
+  weights:
+    class_base: 0.30
+    confidence: 0.20
+    nocturnal: 0.20
+    zone_sensitivity: 0.15
+    persistence: 0.10
+    proximity: 0.05
+  class_base:
+    human: 1.0
+    vehicle: 0.85
+    unknown: 0.45
+    animal: 0.20
+  zone_sensitivity:
+    core: 1.0
+    buffer: 0.6
+    periphery: 0.3
+  bands:
+    critical: 80
+    high: 60
+    medium: 35
+  night_start_hour: 18
+  night_end_hour: 6
+  persistence_saturation: 4
+  proximity_saturation: 0.25
+  persistence:
+    window_seconds: 600
+    max_entries_per_key: 200
+    max_keys: 64
+
+pipeline:
+  tier2_queue_depth: 32         # drop-NEWEST (opposite of the tier1 queue)
+  crop_padding_fraction: 0.2    # context for an ImageNet-pretrained backbone
+  publish_candidates: false     # pre-Tier2 events, useful for a debug UI
+  validate_events: true         # fail on the node, not after a 6-hour outbox
+  utc_offset_hours: 0.0         # node's local offset, for the nocturnal factor
+
+
+# ------------------------------ laptop.yaml ----------------------------------
+identity:
+  zone: core                    # dev default; field nodes set this per install
+ai:
+  tier1:
+    backend: heuristic          # switch to tflite_ssd after fetch_models.py
+    motion_gate:
+      enabled: false            # mains power + correctness while developing
+  tier2:
+    mode: local
+    backend: heuristic          # switch to onnx after exporting EfficientNet-B2
+pipeline:
+  publish_candidates: true      # verbose is fine on a dev box
+  utc_offset_hours: 5.5
+
+
+# ------------------------------- rpi.yaml ------------------------------------
+# hardware_tier: constrained. No CUDA, so Tier2 does not run here.
+ai:
+  tier1:
+    backend: tflite_ssd
+    model_path: models/ssd_mobilenet_v2_coco_int8.tflite
+    labels_path: models/coco_labels.txt
+    num_threads: 3
+    score_threshold: 0.5        # CPU-only; do not wake the pipeline cheaply
+    motion_gate:
+      enabled: true             # power budget is real here
+      min_area_fraction: 0.004
+  tier2:
+    mode: defer_to_cloud        # events ship with tier2_status: deferred
+pipeline:
+  tier2_queue_depth: 8
+  publish_candidates: false
+
+
+# ---------------------------- jetson_nano.yaml -------------------------------
+# 4 GB shared CPU/GPU. Tier2 runs locally but the queue stays modest.
+ai:
+  accelerator: tensorrt
+  tier1:
+    backend: tflite_ssd
+    model_path: models/ssd_mobilenet_v2_coco_int8.tflite
+    score_threshold: 0.45
+    motion_gate:
+      enabled: true
+  tier2:
+    mode: local
+    backend: onnx
+    model_path: models/efficientnet_b2.onnx
+    labels_path: models/tier2_labels.txt
+pipeline:
+  tier2_queue_depth: 16
+
+
+# ---------------------------- jetson_orin.yaml -------------------------------
+ai:
+  accelerator: tensorrt
+  tier1:
+    backend: tflite_ssd
+    model_path: models/ssd_mobilenet_v2_coco_int8.tflite
+    motion_gate:
+      enabled: false            # enough headroom to detect a stationary subject
+  tier2:
+    mode: local
+    backend: onnx
+    model_path: models/efficientnet_b2.onnx
+pipeline:
+  tier2_queue_depth: 64
+
+
+# ------------------------------ env overrides --------------------------------
+#   CW__ai__tier2__mode=disabled
+#   CW__ai__tier1__score_threshold=0.6
+#   CW__ai__tier1__motion_gate__enabled=true
+#   CW__scoring__bands__high=70
+#   CW__pipeline__utc_offset_hours=5.5

@@ -88,3 +88,79 @@ capture:
 # Env overrides work as before, e.g.:
 #   CW__capture__buffer_max_memory_mb=256
 #   CW__capture__tier1_sample_interval_ms=1000
+
+
+# =============================================================================
+# Additions for the video-file driver (offline analysis / evaluation)
+# =============================================================================
+
+# --------------------------- video.yaml (new profile) ------------------------
+# A profile for replaying recorded footage through the real pipeline. Not a
+# field profile — but it uses the identical code path, which is the point.
+identity:
+  node_id: video-analysis-01
+  zone: core
+
+hardware:
+  driver:
+    camera: video
+  camera_params:
+    path: clips/incident.mp4
+    loop: false          # finite ON PURPOSE — we want the run to END
+    realtime: false      # false = flat out (batch); true = pace to file fps
+    speed: 1.0           # only meaningful when realtime: true
+    frame_stride: 1      # process every Nth decoded frame
+    start_frame: 0
+    # end_frame: 900
+    # width/height: downscale 4K footage to a Pi-sized pipeline
+    # width: 1280
+    # height: 720
+
+capture:
+  buffer_seconds: 15
+  buffer_max_memory_mb: 256
+
+  # Gate sampling on the CLIP's timeline, not the wall clock. An 8s clip that
+  # replays in 1.4s of real time would otherwise be sampled 7 times instead of
+  # 40, and most of the footage never examined.
+  #   wall  = elapsed real time (correct for a live camera)
+  #   media = the source's own presentation timestamps (correct for a file)
+  #   auto  = media when the driver provides it, wall when it doesn't
+  tier1_sample_clock: media
+
+  # A file will wait; it is not "ahead" of the consumer. Dropping here makes the
+  # run non-deterministic — which sampled frame Tier1 sees would depend on
+  # thread scheduling — and silently skips footage.
+  #   drop_oldest = stay current (correct for a live camera)
+  #   block       = lose nothing, stay reproducible (correct for a file)
+  tier1_backpressure: block
+
+snapshots:
+  enabled: true
+  directory: out/snapshots
+  mode: crop           # crop | frame | both
+  format: jpg
+  min_band: low        # only persist at or above this risk band
+  max_files: 500       # bounded: an SD card that fills at 3am is an outage
+  max_megabytes: 200
+
+
+# ------------------- snapshots for the field profiles ------------------------
+# base.yaml — off by default. Events carry a snapshot_ref, never image bytes.
+snapshots:
+  enabled: false
+  directory: snapshots
+  mode: crop
+  min_band: high
+  max_files: 200
+  max_megabytes: 100
+
+# rpi.yaml — SD-card write cycles are the constraint here.
+snapshots:
+  enabled: false
+
+# jetson_orin.yaml
+snapshots:
+  enabled: true
+  min_band: high
+  max_megabytes: 500

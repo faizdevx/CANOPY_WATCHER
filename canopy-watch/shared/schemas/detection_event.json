@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://canopy-watch/schemas/detection_event/1.0.0",
+  "title": "DetectionEvent",
+  "description": "The contract every downstream service depends on. Emitted by the edge node, durably stored in the SQLite outbox, published to the broker when connectivity allows, validated by the Ingest Gateway. Carries NO image bytes — events travel over LoRa/4G and must stay small; media moves separately via snapshot_ref.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "event_id",
+    "node_id",
+    "frame_id",
+    "captured_at",
+    "detected_at",
+    "category",
+    "confidence",
+    "bbox",
+    "frame_size",
+    "tier1",
+    "tier2_status",
+    "risk"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Present from v1. Retrofitting versioning onto events already sitting in a field node's outbox is not possible.",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "event_id": { "type": "string", "minLength": 8 },
+
+    "node_id": { "type": "string", "minLength": 1 },
+    "site_id": { "type": ["string", "null"] },
+    "zone": {
+      "type": ["string", "null"],
+      "description": "core | buffer | periphery — feeds the risk scorer's zone_sensitivity factor."
+    },
+
+    "frame_id": {
+      "type": "string",
+      "description": "Traces the event back to the exact frame. Format {node_id}-{sequence:09d}."
+    },
+
+    "captured_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC wall clock when the frame was captured. Monotonic timestamps are node-local and meaningless in the cloud; events can sit in the outbox for hours offline."
+    },
+    "detected_at": { "type": "string", "format": "date-time" },
+    "media_timestamp": {
+      "type": ["number", "null"],
+      "description": "Sensor exposure time in seconds, when the camera stack provides one (CSI paths only). Null means unavailable — NEVER backfilled from receive time."
+    },
+
+    "category": {
+      "type": "string",
+      "enum": ["human", "vehicle", "animal", "unknown"],
+      "description": "Final coarse category: Tier2's when it ran, otherwise Tier1's."
+    },
+    "label": { "type": ["string", "null"], "description": "Finest-grained label available." },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+
+    "bbox": {
+      "type": "object",
+      "description": "Normalized 0-1. Pixel coordinates break when archive resolution differs from capture resolution.",
+      "required": ["x1", "y1", "x2", "y2"],
+      "additionalProperties": false,
+      "properties": {
+        "x1": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y1": { "type": "number", "minimum": 0, "maximum": 1 },
+        "x2": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y2": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "frame_size": {
+      "type": "object",
+      "required": ["width", "height"],
+      "additionalProperties": false,
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      }
+    },
+
+    "tier1": {
+      "type": "object",
+      "required": ["category", "confidence", "backend"],
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": ["string", "null"] },
+        "category": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "backend": { "type": "string" },
+        "model_version": { "type": ["string", "null"] },
+        "latency_ms": { "type": ["number", "null"] },
+        "motion_gated": { "type": ["boolean", "null"] }
+      }
+    },
+
+    "tier2": {
+      "type": ["object", "null"],
+      "description": "Null whenever tier2_status is not 'local'.",
+      "required": ["category", "confidence", "backend"],
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": ["string", "null"] },
+        "category": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "backend": { "type": "string" },
+        "model_version": { "type": ["string", "null"] },
+        "latency_ms": { "type": ["number", "null"] }
+      }
+    },
+
+    "tier2_status": {
+      "type": "string",
+      "enum": ["local", "deferred", "disabled", "failed", "skipped"],
+      "description": "Explicit, never collapsed into a null tier2 field. The cloud must distinguish 'Tier2 ran and found nothing' from 'Tier2 never ran because this is a Pi'."
+    },
+
+    "risk": {
+      "type": "object",
+      "required": ["score", "band", "factors", "scorer_version"],
+      "additionalProperties": false,
+      "properties": {
+        "score": { "type": "number", "minimum": 0, "maximum": 100 },
+        "band": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+        "scorer_version": { "type": "string" },
+        "factors": {
+          "type": "array",
+          "description": "Full breakdown. Deterministic arithmetic, not a learned model — this array is what the Explainability Service will later feed SHAP/LIME, and is human-readable until then.",
+          "items": {
+            "type": "object",
+            "required": ["name", "value", "weight", "contribution"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "value": { "type": "number", "minimum": 0, "maximum": 1 },
+              "weight": { "type": "number", "minimum": 0 },
+              "contribution": { "type": "number" },
+              "reason": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+
+    "snapshot_ref": {
+      "type": ["string", "null"],
+      "description": "Local path or future object-store key. Image bytes never travel inside the event."
+    },
+
+    "pipeline": {
+      "type": ["object", "null"],
+      "description": "Node-side diagnostics; safe to drop at ingest.",
+      "additionalProperties": true
+    }
+  }
+}

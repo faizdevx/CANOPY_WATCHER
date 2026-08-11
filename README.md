@@ -735,3 +735,177 @@ you do not have to run this again again
 if you want to specfically changes the particular service you can go for thing and test the service
 
 
+# TIER 1/TIER 2 
+
+## Tier 1 Detection
+
+Tier 1 is the first stage of detection. Its job is to quickly check incoming frames and identify anything that might be worth investigating further.
+
+The main goal here is **speed and filtering**, not perfect identification.
+
+The flow is:
+
+```text
+Frame
+  ↓
+Motion gate (optional)
+  ↓
+Tier 1 detector
+  ↓
+Candidate
+```
+
+A `Candidate` contains basic information such as the detected category, confidence, and bounding box.
+
+Tier 1 uses a coarse category system instead of trying to identify every possible species. This keeps the first stage lightweight and allows Tier 2 to do the more detailed verification.
+
+Bounding boxes are stored using normalized coordinates rather than raw pixels. This keeps detections independent of the resolution of the original image.
+
+---
+
+## Tier 2 Verification
+
+Tier 2 takes the candidates produced by Tier 1 and performs a more detailed verification.
+
+Instead of running expensive verification on every frame, only the regions identified by Tier 1 are passed forward.
+
+```text
+Tier 1 Candidate
+      ↓
+Crop the relevant region
+      ↓
+Tier 2 verifier
+      ↓
+Verification
+```
+
+The crop is created while the original frame is still available. This is important because the capture buffer may no longer contain that frame later.
+
+Tier 1 and Tier 2 use separate interfaces because they perform different jobs:
+
+* **Tier 1:** find something potentially interesting.
+* **Tier 2:** verify what that something actually is.
+
+---
+
+## Risk Scoring
+
+After detection and verification, the system calculates a risk score.
+
+The risk scorer uses deterministic rules and weighted factors instead of another AI model.
+
+This is intentional. The same inputs should always produce the same score, and the reason behind a score should be understandable.
+
+A score can therefore be broken down into factors such as:
+
+```text
+Detection confidence
+Object/category
+Movement
+Location/context
+Other configured risk factors
+```
+
+The scorer also provides an explanation for the result instead of returning only a single unexplained number.
+
+This makes the final alert easier to understand and debug.
+
+---
+
+## Detection Events
+
+Once the detection has been processed, the result is converted into a `DetectionEvent`.
+
+The event is the standard format used by the rest of the system.
+
+It contains information such as:
+
+* Event ID
+* Timestamp
+* Detection information
+* Normalized bounding box
+* Risk score
+* Tier 2 status
+* Schema version
+
+The event schema is treated as a stable contract because events may be stored locally before they are synchronized elsewhere.
+
+Schema versioning is therefore included from the beginning rather than added later.
+
+---
+
+## Pipeline
+
+The pipeline connects all the stages together:
+
+```text
+Camera Driver
+     ↓
+Capture Service
+     ↓
+Tier 1
+     ↓
+Tier 2
+     ↓
+Risk Scorer
+     ↓
+DetectionEvent
+     ↓
+EventBus
+     ↓
+Storage / Alerts / Other Subscribers
+```
+
+Each stage has a specific responsibility and communicates with the next stage through a defined interface.
+
+The pipeline also uses queues between processing stages.
+
+The queue policies are chosen based on the cost of the work already performed. Dropping an unused camera frame is different from dropping work that Tier 1 has already spent time processing.
+
+This is especially important when Tier 2 is slower than Tier 1.
+
+---
+
+## Video File Driver
+
+The system also supports analysing recorded video files such as MP4s.
+
+The video driver follows the same capture interface as the other camera drivers, so the rest of the pipeline does not need to know whether a frame came from a live camera or a video file.
+
+The main difference is that a video file has a definite end.
+
+```text
+Video file
+   ↓
+Frames
+   ↓
+End of stream
+   ↓
+Clean shutdown
+```
+
+End-of-stream is treated as a normal completion condition, not as a camera failure.
+
+For recorded video, frame sampling uses the video's media timestamp rather than the computer's wall clock. This prevents fast playback or processing from causing large parts of the video to be skipped.
+
+Video processing also uses blocking backpressure where reproducibility is required, so running the same recording multiple times produces consistent results.
+
+---
+
+## Testing
+
+The system is tested around failure cases as well as normal operation.
+
+Important cases include:
+
+* Camera opens but never produces a valid frame
+* Camera disconnects during capture
+* Capture buffer expires before Tier 2 uses the frame
+* Tier 2 is slower than Tier 1
+* End of a video file
+* Repeated analysis of the same video
+* False detections on an empty/background-only video
+
+The goal of the tests is not just code coverage. Each test protects against a specific failure mode that could otherwise reappear during future changes.
+
+At the current stage, the project has **159 passing tests**.

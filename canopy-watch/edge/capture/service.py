@@ -28,7 +28,12 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
-from ..drivers import CameraDriver, CameraError, create_camera_driver
+from ..drivers import (
+    CameraDriver,
+    CameraEndOfStream,
+    CameraError,
+    create_camera_driver,
+)
 from .buffer import (
     CaptureError,
     FrameBuffer,
@@ -46,7 +51,18 @@ DEFAULTS: Dict[str, Any] = {
     "buffer_seconds": 30.0,
     "buffer_max_memory_mb": 512,
     "tier1_sample_interval_ms": 200,
+    # wall | media | auto. Sampling normally gates on elapsed WALL time, which
+    # is correct for a live camera. Replaying a file flat out breaks that: an
+    # 8-second clip finishes in 1.4s of wall clock, so a 200 ms interval samples
+    # 7 frames instead of 40 and most of the footage is never examined. `media`
+    # gates on the source's own presentation timestamps, so the interval means
+    # 200 ms OF VIDEO regardless of replay speed. `auto` uses media time when
+    # the driver supplies it and falls back to wall time when it doesn't.
+    "tier1_sample_clock": "auto",
     "tier1_queue_depth": 1,
+    # drop_oldest | block. Live cameras drop (stay current); finite sources
+    # block (lose nothing, stay reproducible). See LatestFrameQueue.
+    "tier1_backpressure": "drop_oldest",
     "reopen_backoff_s": [1, 2, 5, 10, 30],
     "max_reopen_attempts": 0,          # 0 = never give up (field default)
     "idle_sleep_s": 0.001,
@@ -75,7 +91,14 @@ class CaptureService:
             max_memory_bytes=int(cfg["buffer_max_memory_mb"]) * 1024 * 1024,
         )
         self.sampler = TimeBasedSampler(float(cfg["tier1_sample_interval_ms"]) / 1000.0)
-        self.tier1_queue = LatestFrameQueue(int(cfg["tier1_queue_depth"]))
+        self.sample_clock: str = str(cfg["tier1_sample_clock"])
+        if self.sample_clock not in ("wall", "media", "auto"):
+            raise CaptureError(
+                f"capture: tier1_sample_clock must be wall|media|auto, "
+                f"got {self.sample_clock!r}")
+        self._media_clock_used = False
+        self.tier1_queue = LatestFrameQueue(int(cfg["tier1_queue_depth"]),
+                                            policy=str(cfg["tier1_backpressure"]))
 
         self._backoff: List[float] = [float(x) for x in cfg["reopen_backoff_s"]] or [1.0]
         self._max_reopen = int(cfg["max_reopen_attempts"])
@@ -87,6 +110,9 @@ class CaptureService:
         self._stop = threading.Event()
         self._running = False
         self._started_at: Optional[float] = None
+        # A finite source (video file) finishing is SUCCESS, not a fault.
+        self._ended = threading.Event()
+        self._end_reason: Optional[str] = None
 
         # --- counters ------------------------------------------------------- #
         self._frames_captured = 0
@@ -142,6 +168,7 @@ class CaptureService:
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
+        self.tier1_queue.close()      # unblock a producer waiting in put()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
             self._thread = None
@@ -167,6 +194,15 @@ class CaptureService:
         while not self._stop.is_set():
             try:
                 frame = self.driver.read_frame()
+            except CameraEndOfStream as exc:
+                # Distinct from every other CameraError on purpose: reconnecting
+                # would reopen the same file forever. Shut down cleanly and let
+                # anything waiting on the pipeline know the source is exhausted.
+                self._end_reason = str(exc)
+                logger.info("capture: source exhausted — %s", exc)
+                self._ended.set()
+                self._stop.set()
+                break
             except CameraError as exc:
                 self._read_errors += 1
                 self._last_error = str(exc)
@@ -206,14 +242,43 @@ class CaptureService:
         self._frames_captured += 1
         self._last_frame_at = captured.received_timestamp
 
-        if self.sampler.should_select(captured.received_timestamp):
+        if self.sampler.should_select(self._sample_clock_value(captured)):
             self.tier1_queue.put(captured)
 
         return captured
 
+    def _sample_clock_value(self, captured: CapturedFrame) -> float:
+        """Which clock the sampler gates on."""
+        if self.sample_clock == "wall":
+            return captured.received_timestamp
+        if captured.media_timestamp is None:
+            if self.sample_clock == "media":
+                # Configured for media time but the driver has none. Fall back
+                # rather than sample nothing, and say so once.
+                if not self._media_clock_used:
+                    logger.warning(
+                        "capture: tier1_sample_clock=media but this driver "
+                        "provides no media timestamps — using wall clock")
+                    self._media_clock_used = True
+            return captured.received_timestamp
+        self._media_clock_used = True
+        return captured.media_timestamp
+
     # ------------------------------------------------------------------ #
     # (6) Exact retrieval
     # ------------------------------------------------------------------ #
+
+    def wait_for_end(self, timeout: Optional[float] = None) -> bool:
+        """Block until a finite source is exhausted. False on timeout.
+
+        Meaningless for a live camera, which never ends — that is why this is a
+        query rather than something the loop assumes.
+        """
+        return self._ended.wait(timeout)
+
+    @property
+    def ended(self) -> bool:
+        return self._ended.is_set()
 
     def get_frame(self, frame_id: str) -> CapturedFrame:
         """Return the exact original frame for `frame_id`.
@@ -314,6 +379,8 @@ class CaptureService:
         return {
             "source_id": self.source_id,
             "running": self._running,
+            "ended": self._ended.is_set(),
+            "end_reason": self._end_reason,
             "uptime_s": None if self._started_at is None else round(now - self._started_at, 1),
             "frames_captured": self._frames_captured,
             "sequence": self._sequence,
@@ -327,7 +394,9 @@ class CaptureService:
             "last_error": self._last_error,
             "camera": self.driver.health_detail(),
             "buffer": self.buffer.stats(),
-            "sampler": self.sampler.stats(),
+            "sampler": {**self.sampler.stats(),
+                        "clock": self.sample_clock,
+                        "using_media_time": self._media_clock_used},
             "tier1": self.tier1_queue.stats(),
         }
 
