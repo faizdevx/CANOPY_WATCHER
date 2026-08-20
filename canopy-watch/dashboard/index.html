@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Canopy Watch — Ops Console</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <header class="topstrip">
+    <div class="topstrip__id">
+      <span class="dot dot--live" id="connDot"></span>
+      <span class="mono">CANOPY_WATCH</span>
+      <span class="topstrip__sep">//</span>
+      <span id="connLabel">CONNECTING…</span>
+    </div>
+    <div class="topstrip__clock mono" id="clock">--:--:--</div>
+  </header>
+
+  <main class="wrap">
+
+    <section class="stats" id="stats">
+      <div class="stat">
+        <div class="stat__label">Total Detections</div>
+        <div class="stat__value mono" id="statTotal">—</div>
+        <div class="stat__sub" id="statTotalSub">&nbsp;</div>
+      </div>
+      <div class="stat stat--risk">
+        <div class="stat__label">High-Risk (≥70)</div>
+        <div class="stat__value mono" id="statHigh">—</div>
+        <div class="stat__sub" id="statHighSub">&nbsp;</div>
+      </div>
+      <div class="stat">
+        <div class="stat__label">Stations Online</div>
+        <div class="stat__value mono" id="statStations">—</div>
+        <div class="stat__sub" id="statStationsSub">&nbsp;</div>
+      </div>
+      <div class="stat">
+        <div class="stat__label">Alerts Dispatched</div>
+        <div class="stat__value mono" id="statAlerts">—</div>
+        <div class="stat__sub" id="statAlertsSub">&nbsp;</div>
+      </div>
+    </section>
+
+    <section class="filters">
+      <div class="filter">
+        <label for="fStation">Station</label>
+        <select id="fStation"><option value="">All stations</option></select>
+      </div>
+      <div class="filter">
+        <label for="fRisk">Risk</label>
+        <select id="fRisk">
+          <option value="">All risk</option>
+          <option value="high">High (≥70)</option>
+          <option value="medium">Medium (40–69)</option>
+          <option value="low">Low (&lt;40)</option>
+        </select>
+      </div>
+      <div class="filter">
+        <label for="fTime">Window</label>
+        <select id="fTime">
+          <option value="1h">Last 1 hour</option>
+          <option value="24h" selected>Last 24 hours</option>
+          <option value="7d">Last 7 days</option>
+          <option value="all">All time</option>
+        </select>
+      </div>
+      <div class="filter filter--search">
+        <label for="fSearch">Species / class</label>
+        <input id="fSearch" type="text" placeholder="e.g. Panthera tigris, Human">
+      </div>
+      <button class="btn" id="fReset">Reset</button>
+      <div class="filters__meta mono" id="resultCount">— rows</div>
+    </section>
+
+    <section class="feed">
+      <table class="feed__table">
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Station</th>
+            <th>Class</th>
+            <th>Conf.</th>
+            <th>Risk</th>
+            <th>Alert Status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="feedBody">
+          <tr class="feed__empty"><td colspan="7">Loading sightings…</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <p class="footnote mono" id="dataModeNote"></p>
+
+  </main>
+
+  <!-- Detail drawer -->
+  <div class="drawer" id="drawer" aria-hidden="true">
+    <div class="drawer__panel">
+      <div class="drawer__head">
+        <span class="mono" id="drawerId">SIGHTING</span>
+        <button class="drawer__close" id="drawerClose" aria-label="Close">✕</button>
+      </div>
+      <div class="drawer__body" id="drawerBody"></div>
+    </div>
+    <div class="drawer__scrim" id="drawerScrim"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

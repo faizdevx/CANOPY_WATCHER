@@ -1518,4 +1518,69 @@ PostgreSQL
               Alerts
 
 
-```
+
+
+# DASHBOARD (Operator Console)
+
+Why a dashboard, and why now
+
+Every prior phase produces facts on disk - events in SQLite, rows in Postgres - but nothing lets a human look at them without psql or curl. The dashboard exists to answer one question fast: what did the edge see, and does anyone need to act on it? Not to be a product. It's the point where "the system works" stops being something you prove with a test script and becomes something you prove by opening a page.
+
+Two files, two concerns, same split as everywhere else
+
+``
+
+dashboard/ - reads, never writes. Static HTML/CSS/JS, no build step.
+
+Index.html
+
+style.css
+
+app.js
+
+backend/dashboard.py - aggregation over tables Phase 3 already fills.
+ Does not receive data from the edge. Read-only by design.
+
+`
+
+The dashboard doesn't get its own database or its own write path - that would mean two sources of truth for the same events. It queries the same sightings/stations/alerts tables the Ingest API already writes to.
+
+Design decision: fail visible, not fail blank
+
+If app.js can't reach the API (backend down, wrong API_BASE, CORS not configured yet), it doesn't show an empty page or a stack trace - it falls back to generated sample data and says so in a footnote. A blank dashboard and a populated-but-fake one look identical from across the room; only one of them tells you what's wrong.
+
+Design decision: risk shown twice
+
+Color-coded row border (scan-at-a-glance) plus a numeric badge (don't lose precision to a color). Same reasoning as risk scoring itself back in Tier 2 - a single unexplained signal isn't enough to act on.
+
+What it does not do yet
+
+- Doesn't dispatch alerts - alert.status is displayed, not driven. Wiring LOGGED SMS_DISPATCHED to an actual Twilio/GSM call is a separate, later piece.
+- No auth on the dashboard or the API endpoints it calls.
+- CORS isn't configured on the FastAPI side yet - required before app.js can reach a real backend instead of falling back to sample data.
+
+Operational note
+
+`
+
+# open directly, no server needed:
+
+open dashboard/index.html
+
+# once your API is running, point app.js at it:
+
+# API_BASE = "http://localhost:8000/api/dashboard"
+
+# mount the router in your existing FastAPI app:
+
+from dashboard import router as dashboard_router
+
+app.includerouter(dashboardrouter, prefix="/api/dashboard", tags=["dashboard"])
+
+`
+
+Column names in dashboard.py's SQL assume the Phase 3 schema (sightings, stations, alerts) - check the header comment in that file against your actual columns before wiring it in.
+
+Milestone: open dashboard/index.html`, see real sightings from your Postgres, filter by station/risk/time, click a row for the full detail - same data your edge device produced, now visible without a terminal.
+
+---
