@@ -7,7 +7,15 @@ from abc import ABC, abstractmethod
 
 
 class SyncError(Exception):
-    """Any transport failure: network down, 5xx, timeout."""
+    """Retryable transport failure: network down, timeout, 5xx. The
+    agent will back off and try this event again later."""
+
+
+class PermanentSyncError(SyncError):
+    """The backend has definitively rejected this event — bad schema
+    (422), unknown/revoked token (401/403), or similar 4xx. Retrying
+    with the same payload will fail the same way forever, so the agent
+    dead-letters it instead of backing off and trying again."""
 
 
 class SyncClient(ABC):
@@ -51,5 +59,15 @@ class HTTPSyncClient(SyncClient):
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 if resp.status >= 300:
                     raise SyncError(f"server returned {resp.status}")
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")
+            if 400 <= e.code < 500:
+                # Schema rejected, token rejected, etc. — the backend
+                # has spoken, and sending the same bytes again won't
+                # change its mind.
+                raise PermanentSyncError(f"{e.code}: {body}") from e
+            raise SyncError(f"{e.code}: {body}") from e
         except (urllib.error.URLError, TimeoutError, OSError) as e:
+            # No route, connection refused, DNS failure, read timeout —
+            # all retryable, this is exactly "the internet being stupid".
             raise SyncError(str(e)) from e

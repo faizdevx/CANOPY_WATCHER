@@ -12,7 +12,7 @@ from typing import Optional
 
 from ..store.outbox import Outbox
 from .backoff import next_retry_at
-from .client import SyncClient, SyncError
+from .client import PermanentSyncError, SyncClient, SyncError
 
 log = logging.getLogger("edge.sync.agent")
 
@@ -30,12 +30,20 @@ class SyncAgent:
     def run_once(self) -> dict:
         """One sync pass. Returns counters. Called directly in tests
         without spinning up a thread."""
-        synced, failed = 0, 0
+        synced, failed, dead_lettered = 0, 0, 0
         for event in self.outbox.pending_events(limit=self.batch_size):
             try:
                 self.client.send(event)
                 self.outbox.mark_synced(event.event_id)
                 synced += 1
+            except PermanentSyncError as e:
+                # Backend rejected this specific event for good (bad
+                # schema, revoked token). Retrying changes nothing —
+                # dead-letter it and keep going, this says nothing
+                # about the network or the other events in the batch.
+                self.outbox.mark_dead_letter(event.event_id, str(e))
+                dead_lettered += 1
+                log.warning("dead-lettered %s: %s", event.event_id, e)
             except SyncError as e:
                 attempt = self.outbox.attempts(event.event_id)
                 retry_at = next_retry_at(attempt)
@@ -43,10 +51,11 @@ class SyncAgent:
                 failed += 1
                 log.debug("sync failed for %s: %s (retry at %s)",
                           event.event_id, e, retry_at)
-                # network down for one means it's down for the rest of
-                # this batch too — stop burning through it.
+                # This one looks like the network itself, not the
+                # event — no point burning through the rest of the
+                # batch against a connection that's already down.
                 break
-        return {"synced": synced, "failed": failed,
+        return {"synced": synced, "failed": failed, "dead_lettered": dead_lettered,
                 "pending": self.outbox.pending_count()}
 
     def start(self) -> None:
