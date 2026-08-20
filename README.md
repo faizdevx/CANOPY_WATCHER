@@ -1450,4 +1450,72 @@ Dead-letter queue/handling: Our events right now, if there's an unrecoverable er
  MQTT-specific implementation of SyncClient: As was alluded to, we'll be looking into implementing a full range of MQTT functionality for fleet-managed solutions which will be where many future events and interactions land.
  At-rest payload encryption: If, in the future,DetectionEventPayload payloads do include personally identifying or similarly sensitive information, consider whether en-route and at-rest on disk encryption will be required. This is not something that will be present in initial deployments where events are unlikely to contain PII but it will likely emerge over time.
 
- 
+ ## Offline-First Cloud Synchronization
+
+Canopy Watch is designed to remain operational when the edge device has unreliable or no internet connectivity.
+
+The edge device treats its local SQLite event store as the source of truth until an event has been successfully synchronized with the cloud backend.
+
+### Data Flow
+
+```text
+Camera
+   ↓
+Capture
+   ↓
+Tier 1 Detection
+   ↓
+Tier 2 Verification
+   ↓
+Risk Scoring
+   ↓
+Event
+   ↓
+SQLite Local Event Store
+   ↓
+Sync Agent
+   ↓
+HTTP
+   ↓
+FastAPI Ingest API
+   ↓
+PostgreSQL
+
+```
+
+                 CANOPY WATCH
+
+                    EDGE
+                     │
+                 Detection
+                     │
+                 Risk Score
+                     │
+                   Event
+                     │
+                  SQLite
+                     │
+                Sync Agent
+                     │
+                    HTTP
+                     │
+                     ▼
+              ┌──────────────┐
+              │   FastAPI    │
+              │ Ingest API   │
+              └──────┬───────┘
+                     │
+              Validation/Auth
+                     │
+                Deduplication
+                     │
+                     ▼
+               PostgreSQL
+                 │   │   │
+                 ▼   ▼   ▼
+             Stations
+             Sightings
+              Alerts
+
+
+```
