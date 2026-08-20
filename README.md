@@ -1305,3 +1305,149 @@ You should also have:
 At that point, you have tested the actual workflow rather than merely proving that Python can open a file.
 
 The final goal is simple: someone else should be able to take the same MP4, run the same command, and get the same output.
+
+
+# MAKE IT SURVIVE STUPID INTERNET 
+
+Every other part of the pipeline ( camera drivers,tier1/tier2,riskscoring) assumes the device is alive and working and this part assumes the opposite the device is on pi in field with flaky wifi or jetson relying on Lora/4G that drops for hours and detection must keep happeining no matter what the network is doing and nothing detected should ever be lost because a connection was not there at the moment it happened 
+
+two question kept coming up 
+
+what happens to a detection the instant its produced ?
+what happens to a detection if the internet never comes back? 
+
+a detection happened at that time will written to disk 
+whether it reach to server it is separate later retryable concern 
+
+the thing is what happen on device is fact and what leave is policy 
+
+used SQLITE as three options before settling here:- 
+
+1) in memory queue - faster but pi losing power mid queue loses every unsynced detection not acceptabe a detection that vanished silently is worse then no detection system at all 
+2) flat json - durable but no easy say that particular thing is still pending without scanning and re writing the whole file and no atomic mark this one synced without a lock strategy i'd end up half reinventing SQlite anyway 
+3) now SQLITE embedded no server process ACID ships with pythin runs fine on pi sd and wal mode lets capture pipeline write a new event while the sync agent reads pending ones and without the two blocking eachother 
+
+hence used SQlite 
+
+what about job queue
+
+job ques implies a worker consumes and remove work but outbox implies the row is the detection record sunc just filps a bit on it and that distinction matters here because the events table isnot disposable infrastructure its device local hisotry of everything it has even detected deleting a row the moment it syncs would throw away a record you might later for debugging audits or resync  after a schema change on backend so synced is a column not a delete 
+
+```
+
+                  CANOPY WATCH EDGE DEVICE
+┌─────────────────────────────────────────────────┐
+│                                                   │
+│  Camera                                          │
+│    ↓                                             │
+│  Capture Service                                 │
+│    ↓                                             │
+│  Tier 1 Detection                                │
+│    ↓                                             │
+│  Tier 2 Verification                             │
+│    ↓                                             │
+│  Risk Scoring                                     │
+│    ↓                                             │
+│  Event.new(...)                                  │
+│    ↓                                             │
+│  ┌──────────────────────┐                        │
+│  │       SQLite          │                       │
+│  │                        │                       │
+│  │ EVT1 → synced          │                       │
+│  │ EVT2 → pending         │                       │
+│  │ EVT3 → pending         │                       │
+│  └──────────┬─────────────┘                       │
+│             │                                     │
+│             ↓                                     │
+│        SyncAgent                                  │
+│             │                                     │
+└─────────────┼─────────────────────────────────────┘
+              │
+         Internet?
+          /      \
+        NO        YES
+        │          │
+        │          ↓
+        │      HTTPS Client
+        │          │
+        │          ↓
+        │       Backend
+        │          │
+        │          ↓
+        │     mark_synced()
+        │
+        └── keep locally
+
+
+```
+
+## failure case 
+
+same process used for camera driver interface find failure and then build the interface around it rather then discovering the failure in the field and patching around it later 
+
+internet is down for hours : - events must accumuate bounded by disk not memory and the device must not fall over just because the queue is growing Sqlite is on disk no inmemory buffering of unsynced events 
+
+device loses power / restart mid backlog 
+
+the outbox has to be readbale by fresh process with no shared state from the one that crash pending_events() only looks at the table nothing in process so as a restart just means a new reader against the same file 
+
+sync agent itself throws 
+bad response bug whatever 
+this ust not take detection down with it the agent runs in its own thread with top level try/except around each loop iteration a crash there is logged and the loop continues next interval 
+
+If 3 out of 10 events in a batch fail, don't try to force through 4-10 on the assumption that it won't. Run_once() aborts on the first failure within each pass.
+If the event was already successfully transmitted, the backend will receive it again (backend agent received it, but connection was lost before the ack got back, agent retried. This means we will resend events - use an eventid which acts as the idempotency key - as an inserted eventid (if the detectionevent already exists locally on the backend - if this were a local database it could be an INSERT OR IGNORE, otherwise the backend must dedup based on eventid, by a configuration setting).
+What if multiple field device events show up? Many field devices reconnect with power going to their entire site: if each site syncs with a constant retry, they may collide. To prevent this, backoff should be randomized. (This means an exponential delay for each site sync and also randomization).
+A Pi with a low backoff limit may run through its sequence faster than a Jetson whose parameters require it to wait for up to 24 hours or more. So max_seconds for each device should come from its profile as part of other per-device configs. Laptop environments that are just getting setup or developers working in the device should have brief backoff for fast setup, whereas far-off devices should have long backoff so they aren't banging a live connection after the link goes down for months.
+This client will be an interchangeable interface (and the same thinking is here as was present in the camera factories). The mode of communication, by default, should be as abstract as possible; the means of sending data from a device out into the cloud should not clutter the eventing loop. The SyncAgent cares nothing about whether it's sending via a real camera feed or something like MQTT/cloud streaming for larger-scale management use-cases. At any level it just cares about call on SyncClient.send(event) -> raise SyncError, nothing more. As seen in how tests work, if you just mock SyncClient and assign a value of online=False to the attribute you can test out-of-bound events on a simulated Pi with an intermittent (and ultimately failed) signal exactly the same way you can when testing a genuine Pi with no cell service.
+
+## files??
+
+Division of responsibility for event and file: We can make file responsibility a similar sort of breakdown as seen when moving out the capture service: one file one question. This leads us to a similar breakdown:
+
+event.py - what are we syncing out?
+
+Db.py - where do we keep it locally?
+
+Outbox.py - which events have we not successfully synced yet, and how many are there?
+Client.py - by what method(s) does the data get out to the backend?
+Backoff.py - how long do we wait when we fail to get a send out successfully?
+Agent.py - keep doing this over and over until it's done.
+This means, once more, that a bug in "when will we wait" will not also slip into "when did we send."
+Tests A test of end-to-end synchronization has been written as tests/testofflinesync.py, but this should not be interpreted as an "integration" or a "unit test", as much as an proof of system capability under an end-to-end, three-phase scenario.
+Network OFF. Log 5 detection events on. Assert the 5 events exist locally and attempt at sending to an offline client generates no sent events, as we expect 5 will be held locally.
+Disconnect from client. Reconnect to local persisted (non-persisted in memory, instead from File) database; restart everything, from Outbox down. Verify 5 pending messages persist and are ready for transmission on next opportunity.
+Network ON. Agent autonomously begins to send; when all 5 events transmitted, they should have reached our client. This confirms none were sent in duplicate, and a proper zero is reported for outbox.pending_count.
+
+## to test it up 
+
+```
+Python tests/testofflinesync.py
+```
+--- phase 1: network OFF, detections arriving ---
+
+events stored locally: 5
+
+sync attempt while offline: {'synced': 0, 'failed': 1, 'pending': 5}
+
+--- phase 2: restart edge service (new process, same db) ---
+
+events survived restart: 5
+
+--- phase 3: network ON, agent syncs automatically ---
+
+pending after sync: 0
+
+sent via client: 5
+
+PASS: internet OFF -> detection -> SQLite -> internet ON -> automatic sync
+
+## Areas to consider moving forward include
+
+Dead-letter queue/handling: Our events right now, if there's an unrecoverable error on the server, they’ll keep retrying until the max-backoff is hit each cycle. There should be a distinction between 5xx errors (retryable) and 4xx (non-retryable), and after N retries on a 4xx a hard stop for that event.
+ Log retention for sent items: Sent items are stored locally with little fanfare for months, which may be suitable now but will take up space eventually. In much the same fashion we would handle video archives, we'll need a retention strategy that purges old items once some are sufficiently long off the device.
+ Exposure of pending count: Our health check config requires an explicit measure that the number of pending items is not exceeding some threshold and some means to expose our pending queue's count. Currently it only offers outbox.pending_count() which is accessible by direct invocation; it does not appear in the health dashboard yet.
+ MQTT-specific implementation of SyncClient: As was alluded to, we'll be looking into implementing a full range of MQTT functionality for fleet-managed solutions which will be where many future events and interactions land.
+ At-rest payload encryption: If, in the future,DetectionEventPayload payloads do include personally identifying or similarly sensitive information, consider whether en-route and at-rest on disk encryption will be required. This is not something that will be present in initial deployments where events are unlikely to contain PII but it will likely emerge over time.
+
+ 
