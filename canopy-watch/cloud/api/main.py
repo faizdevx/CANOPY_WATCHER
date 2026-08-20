@@ -10,12 +10,18 @@ from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
-
+from cloud.api.dashboard import router as dashboard_router
 from .auth import authenticate_station
 from .db import get_cursor
 from .schemas import IngestEvent
 
 app = FastAPI(title="Canopy Watch Ingest API")
+
+app.include_router(
+    dashboard_router,
+    prefix="/api/dashboard",
+    tags=["dashboard"],
+)
 
 
 # ---------------------------------------------------------------- events --
