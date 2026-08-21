@@ -57,3 +57,23 @@ Desired application architecture must run on the: Laptop for simulation and deve
 The key architectural design decision is that the differences in platforms are managed in configuration, hardware discovery, factories, and driver interfaces rather than scattering whether this is a Raspberry Pi, whether it is a Jetson or whether it's Windows branches throughout the application.
 
 
+```
+                    CANOPY WATCH
+                         │
+        ┌────────────────┼────────────────┐
+        │                │                │
+     Camera          Edge AI          Local Storage
+        │                │                │
+        ▼                ▼                ▼
+   Frame Capture → Tier 1 → Tier 2 → Risk Score
+                                      │
+                                      ▼
+                                Event Database
+                                      │
+                              ┌───────┴───────┐
+                              │               │
+                           Offline          Online
+                              │               │
+                         Keep Local      Sync Backend
+
+```
